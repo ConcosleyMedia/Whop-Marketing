@@ -1,0 +1,13 @@
+-- Migration 11 — Seed Build Room 10-email welcome series.
+--
+-- Full HTML templates matching the landing-page design system
+-- (paper #F7F5F0 / graphite #1A1A1C / signal #FF5B1F, Inter Tight + Inter +
+-- JetBrains Mono, numbered section dividers, pullquotes, terminal blocks).
+--
+-- Stored in email_templates so the operator can pick them from the library
+-- when creating a campaign. Labels make them filterable in /templates.
+--
+-- Day 07 is marked with a banner in-body: "PLACEHOLDER CASE STUDY — do not
+-- send as-is" per the author's note not to fabricate a member.
+
+-- Day 01 inserted in the next file to keep migration chunks reviewable.

@@ -30,6 +30,7 @@ export default async function SegmentsPage() {
   const { data } = await db
     .from("segments")
     .select("id, name, description, filter_json, member_count, last_evaluated_at, created_at")
+    .or("is_starter_template.is.null,is_starter_template.eq.false")
     .order("created_at", { ascending: false });
 
   const segments = (data ?? []) as SegmentRow[];
