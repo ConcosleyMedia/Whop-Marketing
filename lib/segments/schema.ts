@@ -47,6 +47,13 @@ const OPS_TAG   : Op[] = ["tag_includes", "tag_not_includes"];
 
 export const FIELDS: readonly FieldDef[] = [
   {
+    key: "email",
+    label: "Email address",
+    kind: "text",
+    ops: OPS_TEXT,
+    helpText: "Match by email — supports contains / equals",
+  },
+  {
     key: "lifecycle_stage",
     label: "Lifecycle stage",
     kind: "enum",
