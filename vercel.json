@@ -3,11 +3,11 @@
   "crons": [
     {
       "path": "/api/cron/cadences",
-      "schedule": "*/15 * * * *"
+      "schedule": "13 9 * * *"
     },
     {
       "path": "/api/cron/orchestrator",
-      "schedule": "23 * * * *"
+      "schedule": "23 6 * * *"
     },
     {
       "path": "/api/cron/rescore",
