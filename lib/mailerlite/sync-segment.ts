@@ -17,6 +17,14 @@ export type SegmentSyncResult = {
   imported: number;
   processed: number;
   removed: number;
+  excluded: number;
+};
+
+export type SyncSegmentOptions = {
+  // Lowercase, trimmed emails to exclude from the resulting group. Intended
+  // for frequency-cap enforcement: these users stay in the CRM segment but
+  // are temporarily removed from the MailerLite group for this campaign.
+  excludeEmails?: Set<string>;
 };
 
 // Materialize a CRM segment into a MailerLite group named "CRM: <segment name>",
@@ -29,6 +37,7 @@ export type SegmentSyncResult = {
 // pass 2, the ML group drifts to a superset of the union of all past states.
 export async function syncSegmentToMailerLiteGroup(
   segmentId: string,
+  options: SyncSegmentOptions = {},
 ): Promise<SegmentSyncResult> {
   const db = createAdminClient();
 
@@ -41,10 +50,26 @@ export async function syncSegmentToMailerLiteGroup(
     throw new Error(segErr?.message ?? "Segment not found.");
   }
 
-  const segmentEmails = await collectSegmentEmails(segmentId);
-  if (segmentEmails.size === 0) {
+  const rawEmails = await collectSegmentEmails(segmentId);
+  if (rawEmails.size === 0) {
     throw new Error(
       "Segment has no members to sync. Re-evaluate the segment first.",
+    );
+  }
+
+  // Apply caller-supplied exclusions (e.g. frequency cap). Excluded emails
+  // become stale from the group's perspective — pass 2 will remove them if
+  // they were synced from a previous send.
+  const exclude = options.excludeEmails ?? new Set<string>();
+  const segmentEmails = new Set<string>();
+  for (const e of rawEmails) {
+    if (!exclude.has(e)) segmentEmails.add(e);
+  }
+  const excluded = rawEmails.size - segmentEmails.size;
+
+  if (segmentEmails.size === 0) {
+    throw new Error(
+      `All ${rawEmails.size} segment members were excluded (frequency cap). Campaign not sent.`,
     );
   }
 
@@ -88,10 +113,11 @@ export async function syncSegmentToMailerLiteGroup(
     imported,
     processed,
     removed,
+    excluded,
   };
 }
 
-async function collectSegmentEmails(segmentId: string): Promise<Set<string>> {
+export async function collectSegmentEmails(segmentId: string): Promise<Set<string>> {
   const db = createAdminClient();
   const pageSize = 1000;
   let offset = 0;

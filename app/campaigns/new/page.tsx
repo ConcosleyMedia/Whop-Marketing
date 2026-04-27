@@ -10,7 +10,13 @@ import {
   scheduleCampaign,
   type ScheduleCampaignPayload,
 } from "@/lib/mailerlite/client";
-import { syncSegmentToMailerLiteGroup } from "@/lib/mailerlite/sync-segment";
+import {
+  collectSegmentEmails,
+  syncSegmentToMailerLiteGroup,
+} from "@/lib/mailerlite/sync-segment";
+import { findCappedEmails, getActiveCap } from "@/lib/frequency/check";
+import { substituteVariables } from "@/lib/templates/variables";
+import { TemplatePicker } from "./template-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,6 +39,7 @@ async function createAndScheduleCampaign(formData: FormData) {
   const audience = String(formData.get("audience") ?? "");
   const deliveryMode = String(formData.get("delivery") ?? "instant");
   const scheduleAtLocal = String(formData.get("schedule_at") ?? "");
+  const templateId = String(formData.get("template_id") ?? "").trim() || null;
 
   const fail = (msg: string) => {
     const u = new URL("/campaigns/new", "http://placeholder");
@@ -56,13 +63,26 @@ async function createAndScheduleCampaign(formData: FormData) {
 
   // CRM segments aren't first-class audiences in MailerLite — materialize
   // into a group named "CRM: <segment name>" first, then use that group id.
+  // Frequency cap is enforced here (not for raw MailerLite audiences, where
+  // we don't control who receives — MailerLite does).
   let mailerliteGroupId: string | null = null;
   let crmSegmentId: string | null = null;
+  let capExcluded = 0;
   if (kind === "crm") {
     try {
-      const sync = await syncSegmentToMailerLiteGroup(audienceId);
+      const db = createAdminClient();
+      let excludeEmails = new Set<string>();
+      const cap = await getActiveCap(db);
+      if (cap) {
+        const all = await collectSegmentEmails(audienceId);
+        excludeEmails = await findCappedEmails(db, all, cap);
+      }
+      const sync = await syncSegmentToMailerLiteGroup(audienceId, {
+        excludeEmails,
+      });
       mailerliteGroupId = sync.group_id;
       crmSegmentId = audienceId;
+      capExcluded = sync.excluded;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       fail(`Segment sync failed: ${msg}`);
@@ -90,17 +110,35 @@ async function createAndScheduleCampaign(formData: FormData) {
     schedulePayload = { delivery: "instant" };
   }
 
+  // Resolve {{KEY}} tokens using the central variables table before the HTML
+  // is handed to MailerLite. Tokens are kept as literal text in the template
+  // library so the same template can be reused across multiple campaigns with
+  // different variable values over time. Unknown keys are left as-is — the
+  // editor's Variables panel surfaces them as "undefined" before send.
+  const db = createAdminClient();
+  const { data: varRows } = await db
+    .from("template_variables")
+    .select("key, value");
+  const varMap = Object.fromEntries(
+    ((varRows ?? []) as Array<{ key: string; value: string }>).map((v) => [
+      v.key,
+      v.value,
+    ]),
+  );
+  const resolvedContent = substituteVariables(content, varMap);
+  const resolvedSubject = substituteVariables(subject, varMap);
+
   let created: { id: string } | null = null;
   try {
     const campaign = await createCampaign({
       name,
       emails: [
         {
-          subject,
+          subject: resolvedSubject,
           from_name: fromName,
           from: fromEmail,
           reply_to: replyTo || undefined,
-          content,
+          content: resolvedContent,
         },
       ],
       ...(kind === "segment"
@@ -122,10 +160,9 @@ async function createAndScheduleCampaign(formData: FormData) {
     fail(msg);
   }
 
-  const db = createAdminClient();
   await db.from("campaigns").insert({
     name,
-    subject,
+    subject: resolvedSubject,
     from_name: fromName,
     from_email: fromEmail,
     segment_id: crmSegmentId,
@@ -137,30 +174,57 @@ async function createAndScheduleCampaign(formData: FormData) {
       deliveryMode === "scheduled" && scheduleAtLocal
         ? new Date(scheduleAtLocal).toISOString()
         : null,
+    cap_excluded_count: capExcluded,
+    app_template_id: templateId,
   });
 
   redirect(`/campaigns/${created!.id}`);
 }
 
 export default async function NewCampaignPage(props: {
-  searchParams: Promise<{ error?: string; segment?: string }>;
+  searchParams: Promise<{ error?: string; segment?: string; template?: string }>;
 }) {
   const sp = await props.searchParams;
 
   const db = createAdminClient();
-  const [segments, groups, crmSegmentsRes] = await Promise.all([
-    listSegments(),
-    listGroups(),
-    db
-      .from("segments")
-      .select("id, name, member_count")
-      .order("name", { ascending: true }),
-  ]);
+  const [segments, groups, crmSegmentsRes, templatesRes, selectedTemplateRes] =
+    await Promise.all([
+      listSegments(),
+      listGroups(),
+      db
+        .from("segments")
+        .select("id, name, member_count")
+        .order("name", { ascending: true }),
+      db
+        .from("email_templates")
+        .select("id, name, labels, suggested_subject")
+        .order("updated_at", { ascending: false }),
+      sp.template
+        ? db
+            .from("email_templates")
+            .select("id, name, html, suggested_subject, preview_text")
+            .eq("id", sp.template)
+            .maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+    ]);
   const crmSegments = (crmSegmentsRes.data ?? []) as Array<{
     id: string;
     name: string;
     member_count: number | null;
   }>;
+  const templates = (templatesRes.data ?? []) as Array<{
+    id: string;
+    name: string;
+    labels: string[] | null;
+    suggested_subject: string | null;
+  }>;
+  const selectedTemplate = selectedTemplateRes.data as {
+    id: string;
+    name: string;
+    html: string;
+    suggested_subject: string | null;
+    preview_text: string | null;
+  } | null;
   const sortedSegments = [...segments].sort(
     (a, b) => (b.total ?? 0) - (a.total ?? 0),
   );
@@ -198,13 +262,69 @@ export default async function NewCampaignPage(props: {
         </div>
       )}
 
-      <form action={createAndScheduleCampaign} className="space-y-5">
+      {/* key re-mounts the form when the selected template changes, so
+          uncontrolled Input defaultValues (name/subject/html) initialize
+          from the new template instead of keeping the prior values. */}
+      <form
+        key={selectedTemplate?.id ?? "blank"}
+        action={createAndScheduleCampaign}
+        className="space-y-5"
+      >
+        {templates.length > 0 && (
+          <fieldset className="grid gap-2 rounded-md border bg-muted/20 p-4">
+            <legend className="px-1 text-xs font-medium uppercase text-muted-foreground">
+              Template
+            </legend>
+            {selectedTemplate ? (
+              <div className="flex items-center justify-between gap-2 text-sm">
+                <span>
+                  Using{" "}
+                  <Link
+                    href={`/templates/${selectedTemplate.id}`}
+                    className="font-medium hover:underline"
+                  >
+                    {selectedTemplate.name}
+                  </Link>
+                </span>
+                <Link
+                  href="/campaigns/new"
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  Change / clear
+                </Link>
+              </div>
+            ) : (
+              <>
+                <TemplatePicker
+                  templates={templates}
+                  preservedSegment={sp.segment ?? null}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Or leave blank and paste HTML below — both work.{" "}
+                  <Link
+                    href="/templates/new"
+                    className="underline hover:text-foreground"
+                  >
+                    Create a new template
+                  </Link>
+                </p>
+              </>
+            )}
+          </fieldset>
+        )}
+        <input
+          type="hidden"
+          name="template_id"
+          value={selectedTemplate?.id ?? ""}
+        />
+
         <div className="grid gap-2">
           <Label htmlFor="name">Internal name</Label>
           <Input
             id="name"
             name="name"
             required
+            defaultValue={selectedTemplate?.name ?? ""}
             placeholder="e.g. Win-back churned Pro users · May 2026"
           />
           <p className="text-xs text-muted-foreground">
@@ -218,6 +338,7 @@ export default async function NewCampaignPage(props: {
             id="subject"
             name="subject"
             required
+            defaultValue={selectedTemplate?.suggested_subject ?? ""}
             placeholder="Subject your subscribers will see"
           />
         </div>
@@ -310,12 +431,16 @@ export default async function NewCampaignPage(props: {
             name="content"
             required
             rows={14}
+            defaultValue={selectedTemplate?.html ?? ""}
             placeholder="Paste the HTML generated by Claude design here..."
             className="rounded-md border border-input bg-background p-3 font-mono text-xs"
           />
           <p className="text-xs text-muted-foreground">
             If your HTML is missing an unsubscribe link, MailerLite appends its
             default footer automatically.
+            {selectedTemplate && (
+              <> Pre-filled from <span className="font-medium">{selectedTemplate.name}</span> — edit freely; the template stays unchanged.</>
+            )}
           </p>
         </div>
 

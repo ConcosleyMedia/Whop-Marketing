@@ -220,6 +220,27 @@ export type ImportJob = {
   [k: string]: unknown;
 };
 
+// Synchronous single-subscriber upsert + group assignment. Much faster than
+// the import-subscribers async pipeline (hundreds of ms vs seconds), so this
+// is preferred when assigning ONE subscriber. Falls back to import if a
+// caller has many subscribers to add.
+export type SubscriberUpsert = {
+  id: string;
+  email: string;
+  status?: string;
+};
+export async function upsertSubscriberToGroup(
+  email: string,
+  groupId: string,
+): Promise<SubscriberUpsert> {
+  const r = await call<{ data: SubscriberUpsert }>("POST", "/subscribers", {
+    email,
+    groups: [groupId],
+    status: "active",
+  });
+  return r.data;
+}
+
 export async function importSubscribers(
   groupId: string,
   subscribers: ImportSubscriber[],
