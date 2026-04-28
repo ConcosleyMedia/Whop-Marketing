@@ -10,7 +10,7 @@ export default function LoginPage() {
         <div className="space-y-2 text-center">
           <h1 className="text-2xl font-semibold tracking-tight">CRM</h1>
           <p className="text-sm text-muted-foreground">
-            Sign in with a magic link.
+            Sign in to manage CRM, cadences, and campaigns.
           </p>
         </div>
         <Suspense fallback={null}>
