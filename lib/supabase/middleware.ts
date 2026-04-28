@@ -3,8 +3,9 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const PUBLIC_PATH_PREFIXES = [
   "/auth",
-  "/api/webhooks",
-  "/api/sync",
+  "/api/webhooks", // HMAC-signature auth
+  "/api/sync",     // x-sync-secret auth
+  "/api/cron",     // Vercel Cron Bearer auth
   "/_next",
   "/favicon.ico",
 ];

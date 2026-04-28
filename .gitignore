@@ -39,7 +39,6 @@ yarn-error.log*
 
 # editor / agent local config
 /.claude
-proxy.ts
 
 # typescript
 *.tsbuildinfo
