@@ -12,8 +12,13 @@ export class MailerLiteError extends Error {
 }
 
 function getAuthHeaders(): HeadersInit {
-  const key = process.env.MAILERLITE_API_KEY;
-  if (!key) throw new Error("Missing MAILERLITE_API_KEY env var");
+  const raw = process.env.MAILERLITE_API_KEY;
+  if (!raw) throw new Error("Missing MAILERLITE_API_KEY env var");
+  // Strip whitespace, newlines, and surrounding quotes — common paste errors
+  // when copying long JWTs into Vercel/host env-var fields. Without this,
+  // fetch's Headers.append throws "invalid header value" and crashes the
+  // whole request before it leaves our code.
+  const key = raw.trim().replace(/^["']|["']$/g, "");
   return {
     Authorization: `Bearer ${key}`,
     "Content-Type": "application/json",
