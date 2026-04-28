@@ -52,9 +52,23 @@ type RecentCancellationRow = {
   canceled_at: string | null;
   cancellation_reason: string | null;
   products: { title: string | null } | null;
-  plans: { renewal_price: number | string | null; initial_price: number | string | null } | null;
+  plans: {
+    renewal_price: number | string | null;
+    initial_price: number | string | null;
+    billing_period_days: number | null;
+  } | null;
   users: { id: string; email: string | null; name: string | null; total_ltv: number | string | null } | null;
 };
+
+// What's the recurring monthly revenue we just lost on this cancellation?
+// Normalizes any billing cadence (weekly / monthly / annual) to monthly.
+function monthlyMrrLost(plan: RecentCancellationRow["plans"]): number {
+  if (!plan) return 0;
+  const price = Number(plan.renewal_price ?? 0);
+  const days = Number(plan.billing_period_days ?? 0);
+  if (!price || !days) return 0;
+  return Math.round((price * 30) / days * 100) / 100;
+}
 
 function toDateKey(isoOrDate: string | Date): string {
   const d = typeof isoOrDate === "string" ? new Date(isoOrDate) : isoOrDate;
@@ -208,7 +222,7 @@ export default async function Home(props: {
     db
       .from("memberships")
       .select(
-        "id, canceled_at, cancellation_reason, products(title), plans(renewal_price, initial_price), users!inner(id, email, name, total_ltv)",
+        "id, canceled_at, cancellation_reason, products(title), plans(renewal_price, initial_price, billing_period_days), users!inner(id, email, name, total_ltv)",
       )
       .not("canceled_at", "is", null)
       .order("canceled_at", { ascending: false })
@@ -586,6 +600,7 @@ export default async function Home(props: {
                     m.plans?.renewal_price ?? m.plans?.initial_price ?? 0,
                   );
                   const isPaid = ltv > 0 || planPrice > 0;
+                  const mrrLost = monthlyMrrLost(m.plans);
                   return (
                     <li
                       key={m.id}
@@ -612,12 +627,24 @@ export default async function Home(props: {
                             : ""}
                         </p>
                       </div>
-                      <div className="shrink-0 pl-3 text-right">
-                        {ltv > 0 && (
+                      <div
+                        className="shrink-0 pl-3 text-right"
+                        title={
+                          ltv > 0
+                            ? `Lifetime spend across all products: ${formatMoney(ltv)}`
+                            : ""
+                        }
+                      >
+                        {mrrLost > 0 ? (
                           <span className="block font-mono text-[11px] text-rose-300">
-                            {formatMoney(ltv)} lost
+                            −{formatMoney(mrrLost)}
+                            <span className="text-rose-300/60">/mo</span>
                           </span>
-                        )}
+                        ) : isPaid && ltv > 0 ? (
+                          <span className="block font-mono text-[11px] text-zinc-500">
+                            {formatMoney(ltv)} lifetime
+                          </span>
+                        ) : null}
                         <span className="block font-mono text-[10px] text-zinc-500">
                           {formatRelative(m.canceled_at)}
                         </span>
