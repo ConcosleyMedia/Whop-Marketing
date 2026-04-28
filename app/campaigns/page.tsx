@@ -60,7 +60,26 @@ export default async function CampaignsPage(props: {
     : "sent";
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 
-  const { campaigns, total } = await listCampaigns({ status, limit: 25, page });
+  // MailerLite has been flaky / env-var fragile; don't take down the whole
+  // route if its API call fails. Surface a banner instead so the operator
+  // can fix the env var without staring at a 500.
+  let campaigns: Awaited<ReturnType<typeof listCampaigns>>["campaigns"] = [];
+  let total: number | null = 0;
+  let mailerliteError: string | null = null;
+  try {
+    const r = await listCampaigns({ status, limit: 25, page });
+    campaigns = r.campaigns;
+    total = r.total;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    mailerliteError = msg;
+    console.error(
+      `[campaigns] listCampaigns failed: ${msg}`,
+      err instanceof Error && "body" in err
+        ? `body: ${(err as { body?: unknown }).body}`
+        : "",
+    );
+  }
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6">
@@ -86,6 +105,22 @@ export default async function CampaignsPage(props: {
       {sp.error && (
         <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {sp.error}
+        </div>
+      )}
+
+      {mailerliteError && (
+        <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
+          <p className="font-medium text-destructive">
+            Couldn&rsquo;t reach MailerLite
+          </p>
+          <p className="mt-1 break-all font-mono text-[11px] text-destructive/80">
+            {mailerliteError}
+          </p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Check the <code>MAILERLITE_API_KEY</code> env var on Vercel — full
+            JWT, no surrounding whitespace, no other vars in the same value.
+            Then redeploy.
+          </p>
         </div>
       )}
 
