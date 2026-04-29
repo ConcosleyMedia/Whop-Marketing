@@ -1,23 +1,45 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getWhopClient } from "@/lib/whop/client";
 import { upsertMembership, upsertPayment, writeActivity } from "@/lib/whop/upsert";
 import { applyScoreSafe } from "@/lib/scoring/apply";
 import { enrollUserInCadence, findCadencesForWhopMembership } from "@/lib/cadences/enroll";
+import { verifyWhopWebhook } from "@/lib/whop/verify-webhook";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   const body = await request.text();
-  const headers = Object.fromEntries(request.headers);
+  const headersRaw = Object.fromEntries(request.headers);
+
+  // Verify with our custom verifier (tries multiple key derivations because
+  // Whop's UI shows ws_<hex> while their SDK + standardwebhooks expect
+  // base64. Different formats get tried until one matches the signature).
+  const verifyResult = verifyWhopWebhook(
+    body,
+    headersRaw,
+    process.env.WHOP_WEBHOOK_SECRET,
+  );
+  if (!verifyResult.ok) {
+    console.error(
+      `[whop webhook] signature verification failed: ${verifyResult.error}`,
+    );
+    return NextResponse.json(
+      { error: `signature verification failed: ${verifyResult.error}` },
+      { status: 400 },
+    );
+  }
+  console.log(
+    `[whop webhook] verified using key variant: ${verifyResult.keyVariant}`,
+  );
 
   let event: { id: string; type: string; data: unknown; timestamp?: string };
   try {
-    const whop = getWhopClient();
-    event = whop.webhooks.unwrap(body, { headers }) as typeof event;
+    event = JSON.parse(body);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `signature verification failed: ${message}` }, { status: 400 });
+    return NextResponse.json(
+      { error: `invalid json: ${err instanceof Error ? err.message : String(err)}` },
+      { status: 400 },
+    );
   }
 
   const db = createAdminClient();
