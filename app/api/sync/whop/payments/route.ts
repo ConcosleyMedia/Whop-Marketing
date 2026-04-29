@@ -3,7 +3,7 @@ import { syncPayments } from "@/lib/whop/sync";
 import { checkSyncSecret } from "@/lib/sync-auth";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
+export const maxDuration = 800;
 
 export async function POST(request: Request) {
   const authErr = checkSyncSecret(request);

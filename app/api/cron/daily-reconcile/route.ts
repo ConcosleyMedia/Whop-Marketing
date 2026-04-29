@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 // 25k memberships + 9k payments takes ~5 min via the iterating Whop API.
 // Vercel Pro's max is 900s; Hobby is 300s. Set near Pro's max — if Vercel
 // kills it on Hobby, split into two cron routes.
-export const maxDuration = 300;
+export const maxDuration = 800;
 
 function isCronAuthorized(request: Request): boolean {
   const expected = process.env.CRON_SECRET;
