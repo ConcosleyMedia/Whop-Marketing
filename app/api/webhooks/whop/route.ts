@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { upsertMembership, upsertPayment, writeActivity } from "@/lib/whop/upsert";
 import { applyScoreSafe } from "@/lib/scoring/apply";
-import { enrollUserInCadence, findCadencesForWhopMembership } from "@/lib/cadences/enroll";
+import {
+  enrollUserInCadence,
+  findCadencesForWhopEvent,
+  findCadencesForWhopMembership,
+} from "@/lib/cadences/enroll";
 import { verifyWhopWebhook } from "@/lib/whop/verify-webhook";
 
 export const dynamic = "force-dynamic";
@@ -75,6 +79,26 @@ export async function POST(request: Request) {
   }
 }
 
+// Wraps cadence enrollment to never throw — webhook dispatch must keep
+// going. Errors are logged and swallowed.
+async function safeEnrollAll(
+  db: ReturnType<typeof createAdminClient>,
+  cadenceIds: string[],
+  userId: string,
+  reason: string,
+): Promise<void> {
+  for (const cadenceId of cadenceIds) {
+    try {
+      await enrollUserInCadence(db, cadenceId, userId, { reason });
+    } catch (err) {
+      console.error(
+        `[cadence] enroll user=${userId} cadence=${cadenceId} failed:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+}
+
 async function dispatch(
   db: ReturnType<typeof createAdminClient>,
   event: { id: string; type: string; data: unknown },
@@ -104,25 +128,39 @@ async function dispatch(
       await applyScoreSafe(db, result.user_id, { reason: t });
     }
 
-    // Auto-enroll new memberships into matching cadences. Only on activation
-    // events — we don't want re-enrollments on cancel/uncancel toggles.
-    if (t === "membership.activated" && result.user_id) {
+    if (result.user_id) {
       const planWhopId =
         (event.data as { plan?: { id?: string } } | null)?.plan?.id ?? null;
-      const cadenceIds = await findCadencesForWhopMembership(db, planWhopId);
-      for (const cadenceId of cadenceIds) {
-        try {
-          await enrollUserInCadence(db, cadenceId, result.user_id, {
-            reason: `whop.${t} · plan ${planWhopId ?? "unknown"}`,
-          });
-        } catch (err) {
-          // Don't fail the webhook on enrollment errors — just log.
-          console.error(
-            `[cadence] enroll user=${result.user_id} cadence=${cadenceId} failed:`,
-            err instanceof Error ? err.message : err,
-          );
-        }
+
+      // 1) whop_membership trigger — only on activation, fires the
+      //    welcome-style cadences (e.g. Build Room 10-day welcome).
+      if (t === "membership.activated") {
+        const ids = await findCadencesForWhopMembership(db, planWhopId);
+        await safeEnrollAll(
+          db,
+          ids,
+          result.user_id,
+          `whop.${t} · plan ${planWhopId ?? "unknown"}`,
+        );
       }
+
+      // 2) whop_event trigger — fires for ANY membership.* event whose
+      //    type matches the cadence's trigger_config.event_types[]. With
+      //    optional payload predicates (e.g., only when
+      //    cancel_at_period_end becomes true). This is what powers
+      //    cancel-save, past-due rescue, etc.
+      const eventCadenceIds = await findCadencesForWhopEvent(
+        db,
+        t,
+        planWhopId,
+        event.data,
+      );
+      await safeEnrollAll(
+        db,
+        eventCadenceIds,
+        result.user_id,
+        `whop_event.${t}`,
+      );
     }
     return;
   }
@@ -151,6 +189,23 @@ async function dispatch(
     });
     if (result.user_id) {
       await applyScoreSafe(db, result.user_id, { reason: t });
+
+      // whop_event trigger for payment / refund / dispute events. Powers
+      // past-due rescue, refund follow-up, etc.
+      const planWhopId =
+        (event.data as { plan?: { id?: string } } | null)?.plan?.id ?? null;
+      const eventCadenceIds = await findCadencesForWhopEvent(
+        db,
+        t,
+        planWhopId,
+        event.data,
+      );
+      await safeEnrollAll(
+        db,
+        eventCadenceIds,
+        result.user_id,
+        `whop_event.${t}`,
+      );
     }
     return;
   }

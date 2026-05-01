@@ -135,3 +135,64 @@ export async function findCadencesForWhopMembership(
   }
   return matches;
 }
+
+// Get a value at a dot-path inside an arbitrary JSON object. Used for the
+// optional payload_path predicate on whop_event triggers.
+function getAtPath(obj: unknown, path: string): unknown {
+  const parts = path.split(".");
+  let cur: unknown = obj;
+  for (const p of parts) {
+    if (cur && typeof cur === "object" && p in (cur as Record<string, unknown>)) {
+      cur = (cur as Record<string, unknown>)[p];
+    } else {
+      return undefined;
+    }
+  }
+  return cur;
+}
+
+// Find cadences with trigger_type='whop_event' that match a given event.
+// Caller passes the raw event.type (e.g. "membership.cancel_at_period_end_changed"),
+// the affected plan id (null if not in payload), and the payload object so
+// we can evaluate optional payload predicates.
+export async function findCadencesForWhopEvent(
+  db: Db,
+  eventType: string,
+  planWhopId: string | null,
+  payload: unknown,
+): Promise<string[]> {
+  const { data, error } = await db
+    .from("cadences")
+    .select("id, trigger_type, trigger_config")
+    .eq("status", "active")
+    .eq("trigger_type", "whop_event");
+  if (error) return [];
+
+  const matches: string[] = [];
+  for (const row of (data ?? []) as Array<{
+    id: string;
+    trigger_config: {
+      event_types?: string[];
+      plan_ids?: string[];
+      payload_path?: string;
+      payload_value?: string | number | boolean;
+    } | null;
+  }>) {
+    const cfg = row.trigger_config ?? {};
+    const eventTypes = Array.isArray(cfg.event_types) ? cfg.event_types : [];
+    if (!eventTypes.includes(eventType)) continue;
+
+    const planIds = Array.isArray(cfg.plan_ids) ? cfg.plan_ids : [];
+    if (planIds.length > 0 && (!planWhopId || !planIds.includes(planWhopId))) {
+      continue;
+    }
+
+    if (cfg.payload_path !== undefined) {
+      const actual = getAtPath(payload, cfg.payload_path);
+      if (actual !== cfg.payload_value) continue;
+    }
+
+    matches.push(row.id);
+  }
+  return matches;
+}

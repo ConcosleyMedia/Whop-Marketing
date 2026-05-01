@@ -16,6 +16,7 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { sendCadenceStep } from "./send";
 import { CadenceSequence, type CadenceSequenceT } from "./types";
+import { evaluateExitCondition } from "./exit-conditions";
 
 type Db = ReturnType<typeof createAdminClient>;
 
@@ -124,6 +125,32 @@ export async function runDueCadenceSteps(
     }
 
     const step = seq.steps[e.current_step];
+
+    // Per-step exit conditions: re-read user state and bail out if the
+    // user no longer meets the criteria the cadence assumed. e.g., a
+    // cancel-save cadence stops as soon as cancel_at_period_end goes
+    // back to false.
+    if (step.exit_if) {
+      const exitReason = await evaluateExitCondition(
+        db,
+        e.user_id,
+        step.exit_if,
+      );
+      if (exitReason) {
+        await db
+          .from("cadence_enrollments")
+          .update({
+            status: "exited",
+            exit_reason: exitReason,
+            completed_at: new Date().toISOString(),
+            next_action_at: null,
+            last_send_at: new Date().toISOString(),
+          })
+          .eq("id", e.id);
+        summary.skipped++;
+        continue;
+      }
+    }
 
     // Send the email.
     const result = await sendCadenceStep(db, {
