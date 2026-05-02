@@ -398,20 +398,58 @@ Currently filterable: `email`, `lifecycle_stage`, `verification_status`,
 {
   "version": 1,
   "steps": [
-    {"type": "send_email", "template_id": "<uuid>", "delay_hours": 0},
+    {
+      "type": "send_email",
+      "template_id": "<uuid>",
+      "delay_hours": 0,
+      "require_segment_id": "<uuid>",
+      "exit_if": {
+        "match": "all",
+        "rules": [{"field": "any_cancel_at_period_end", "op": "is_false"}],
+        "reason": "un-cancelled"
+      }
+    },
     {"type": "send_email", "template_id": "<uuid>", "delay_hours": 24}
   ]
 }
 ```
 v1 only supports `send_email`. `delay_hours` is from-prior-step; step 0's
-delay is from enrollment.
+delay is from enrollment. `require_segment_id` (optional) skips the step
+if the user is no longer in that segment at send time. `exit_if` (optional)
+exits the entire enrollment if the rule matches — see "Exit conditions"
+below.
 
 ### Trigger types
 - `whop_membership` — `trigger_config.plan_ids: [...]`. Empty = any plan.
   Fired by webhook on `membership.activated`.
+- `whop_event` — `trigger_config.event_types: [...]` (required, ≥1) plus
+  optional `plan_ids`, `payload_path`, `payload_value`. Fires on any
+  Whop webhook event matching the configured types. The payload predicate
+  filters on a single JSON path — e.g. `payload_path="cancel_at_period_end"`
+  + `payload_value=true` fires only when the user *actually* clicks cancel,
+  not when they un-cancel. Powers save-flow, past-due rescue, dispute
+  follow-up, etc.
 - `segment_added` — `trigger_config.segment_id: <uuid>`. Fired hourly by
   orchestrator for each user newly in the segment.
 - `manual` — only via UI on `/cadences/[id]`.
+
+### Exit conditions (`exit_if`)
+Optional per-step filter evaluated against the user's CURRENT state
+(re-read at runtime, not enrollment time). If it matches, the runner
+short-circuits the enrollment with a recorded reason — no further sends.
+
+**Field set** (`lib/cadences/exit-conditions.ts`):
+- `lifecycle_stage`, `lead_temperature`, `total_ltv` — from `users` table
+- `any_active_membership`, `any_cancel_at_period_end`,
+  `any_past_due_membership` — derived from `memberships` rows
+
+**Operators**: `eq`, `neq`, `gt`, `lt`, `gte`, `lte`, `is_true`, `is_false`
+
+**Match modes**: `all` (default — every rule must match) or `any` (at least
+one). Up to 10 rules per condition.
+
+Use cases: stop the cancel-save cadence the moment they un-cancel, stop
+past-due rescue when their card works, stop win-back when they re-purchase.
 
 ### Send mechanics (`lib/cadences/send.ts`)
 1. Resolve `{{KEY}}` variables from `template_variables`
@@ -427,9 +465,18 @@ delay is from enrollment.
 - `last_sent_step >= current_step` guard prevents double-send when two cron
   invocations overlap
 
-### Build Room cadence (seeded migration 0011)
-`Build Room · 10-day welcome` — trigger `whop_membership` on plan
-`plan_yRLG1PNR7m8Yh`. 10 templates, Day 1 instant, Days 2-10 every 24h.
+### Live cadences
+
+| Cadence | Trigger | Scope | Status |
+|---|---|---|---|
+| `Build Room · 10-day welcome` | `whop_membership` | plan `plan_yRLG1PNR7m8Yh` only | active — 10 templates, Day 1 instant + Days 2–10 every 24h |
+| `Cancel-save · 3-touch` | `whop_event` on `membership.cancel_at_period_end_changed` (`payload_value=true`) | company-wide | active — 3 templates: Day 0 / Day 2 / Day 5. Each step `exit_if` `any_cancel_at_period_end is_false` (un-cancel exits the flow) |
+| `Past-due rescue · payment recovery` | `whop_event` on `payment.failed` | company-wide | **draft** — placeholder templates from migration 0015. 3 steps: Day 1 / Day 3 / Day 7. Each step `exit_if` `any_past_due_membership is_false` |
+| `Win-back · 60-day re-engagement` | `segment_added` | placeholder `segment_id` (operator wires before activating) | **draft** — placeholder templates from migration 0015. 3 steps: Day 0 / Day 7 / Day 14. Each step `exit_if` `lifecycle_stage neq churned` |
+
+The two `draft` cadences need their templates populated (see `/templates`,
+filter by label `lifecycle`) and — for win-back — `trigger_config.segment_id`
+wired to a real segment before the operator flips status to `active`.
 
 ---
 
@@ -635,6 +682,8 @@ supabase/migrations/
   0012_template_variables.sql
   0013_cadence_runtime.sql
   0014_system_runs.sql
+  0015_seed_lifecycle_cadences.sql  # past-due + winback placeholders, dup cancel-save (cleaned up by 0016)
+  0016_cleanup_cancel_save_duplicate.sql
 
 vercel.json                      # 4 cron schedules
 ```
@@ -696,37 +745,60 @@ A single user can have multiple membership rows for the same product (e.g.,
 
 ### Scenario: "When member's payment fails, send save-flow email"
 
-1. **Make sure trigger fires.** Whop webhook `payment.failed` already lands in `webhook_log`. The handler scores the user but doesn't enroll cadences yet for payment events — only for `membership.activated`. To fix, edit `app/api/webhooks/whop/route.ts` payment branch to call `findCadencesForWhopEvent("payment.failed")` and enroll matching cadences. Requires extending trigger model — see §18.
+A `Past-due rescue · payment recovery` cadence already ships as a draft
+(seeded by migration 0015). To go live:
 
-2. **Author template.** Create at `/templates/new` with `name="Past-due rescue"`, body explaining the failure + link to update card. Use `{{WHOP_BUILDROOM_URL}}` etc.
+1. **Populate templates.** `/templates` filtered by labels `past-due` +
+   `lifecycle` shows the 3 placeholder bodies (Day 1 / Day 3 / Day 7).
+   Replace the placeholder HTML with real copy — include the update-card
+   link and `{{WHOP_BUILDROOM_URL}}` / `{{SENDER_NAME}}` variables.
+2. **Activate.** `/cadences/[id]` for the past-due cadence → flip status
+   `draft → active`. Webhook handler already routes `payment.failed`
+   events to `findCadencesForWhopEvent()` (see
+   `app/api/webhooks/whop/route.ts`).
+3. **Done.** Each step `exit_if` automatically bails out when the user no
+   longer has a `past_due` membership — no manual intervention needed
+   when the card recovers.
 
-3. **Create cadence.** Insert into `cadences`:
-   - `trigger_type='whop_event'` (new type), `trigger_config={'event_types': ['payment.failed']}`
-   - 3-step sequence: 0h save-flow, 48h "still here?", 168h last call
-   - `status='active'`
-
-4. **Wire the orchestrator** to enroll users matching this trigger.
+To author a *new* `whop_event` cadence from scratch, insert into `cadences`:
+- `trigger_type='whop_event'`
+- `trigger_config={'event_types': ['<event.type>'], 'plan_ids': [], 'payload_path': '...', 'payload_value': ...}`
+- `sequence_json` per the v1 schema in §8 (use `exit_if` on each step
+  if the cadence should self-cancel)
 
 ### Scenario: "Win-back members who churned 60+ days ago"
+
+A `Win-back · 60-day re-engagement` cadence ships as a draft (seeded by
+migration 0015) — it just needs the segment wired:
 
 1. **Create segment** at `/segments/new`:
    - `lifecycle_stage = churned`
    - `last_purchased_at gt_days_ago 60`
    - `last_purchased_at lt_days_ago 365` (avoid ancient ones)
-2. **Create cadence** with `trigger_type='segment_added'`, `trigger_config.segment_id=<uuid>`. 3-step sequence.
-3. Hourly orchestrator auto-enrolls newly-matching users.
-4. **Add exit condition** so they un-enroll when `lifecycle_stage` becomes active (i.e. they re-purchased) — see §18.
+2. **Wire it to the cadence.**
+   `UPDATE cadences SET trigger_config = jsonb_set(trigger_config, '{segment_id}', '"<uuid>"'::jsonb) WHERE id = '22222222-2222-2222-2222-e00000000001';`
+3. **Populate templates.** `/templates` filtered by `winback` shows the 3
+   placeholder bodies (Day 0 / Day 7 / Day 14).
+4. **Activate.** Hourly orchestrator auto-enrolls newly-matching users.
+   Each step `exit_if` automatically bails when `lifecycle_stage` leaves
+   `churned` (i.e. the user re-purchased).
 
 ---
 
 ## 18. Missing primitives (recommended next builds)
 
-In priority order:
+### Recently shipped
 
-1. **`whop_event` trigger type** — let cadences fire on any Whop webhook event type, not just `membership.activated`. Unlocks save-flow + past-due-rescue.
-2. **Per-step exit conditions** — "skip remaining steps if user state changed" (e.g., payment recovered, user un-cancelled). Defined as a filter expression evaluated before each step.
-3. **Segment-exit triggers** — symmetric with `segment_added`. "When user leaves segment X, enroll in cadence Y." Or "exit cadence Y when leaves segment X."
-4. **Step branching** — `next_if(condition) → step_a, else → step_b`. Supports email A/B paths.
-5. **Action types beyond email** — tag user, update field, fire external webhook, post to Slack.
-6. **LLM step type** — for content personalization (not for routing decisions).
-7. **Per-user MailerLite group cleanup** — purge `crm-user-*` groups for users who completed every cadence > 30 days ago.
+- ✅ **`whop_event` trigger type** — shipped in [3e4c1bb](https://github.com/ConcosleyMedia/Whop-Marketing/commit/3e4c1bb). See §8.
+- ✅ **Per-step exit conditions (`exit_if`)** — shipped in [3e4c1bb](https://github.com/ConcosleyMedia/Whop-Marketing/commit/3e4c1bb). See §8.
+- ✅ **Past-due rescue + win-back cadence seeds** — shipped as drafts in
+  [1efe08f](https://github.com/ConcosleyMedia/Whop-Marketing/commit/1efe08f); cancel-save dedup in [b548f68](https://github.com/ConcosleyMedia/Whop-Marketing/commit/b548f68).
+
+### Still missing (priority order)
+
+1. **Segment-exit triggers** — symmetric with `segment_added`. "When user leaves segment X, enroll in cadence Y." Or "exit cadence Y when leaves segment X." (`exit_if` partially covers the second use case but is per-step, not segment-aware.)
+2. **Step branching** — `next_if(condition) → step_a, else → step_b`. Supports email A/B paths.
+3. **Action types beyond email** — tag user, update field, fire external webhook, post to Slack.
+4. **LLM step type** — for content personalization (not for routing decisions).
+5. **Cadence builder UI** — `/cadences/new` page with trigger picker + per-step editor exposing `exit_if`. Currently authoring is SQL-migration-only; fine while there are <10 cadences but a tax on iteration speed beyond that.
+6. **Per-user MailerLite group cleanup** — purge `crm-user-*` groups for users who completed every cadence > 30 days ago.
