@@ -469,7 +469,7 @@ past-due rescue when their card works, stop win-back when they re-purchase.
 
 | Cadence | Trigger | Scope | Status |
 |---|---|---|---|
-| `Build Room · 10-day welcome` | `whop_membership` | plan `plan_yRLG1PNR7m8Yh` only | active — 10 templates, Day 1 instant + Days 2–10 every 24h |
+| `Free signup · 10-day welcome` | `whop_membership` | plan `plan_yRLG1PNR7m8Yh` (free AutomationFlow) only | active — 10 templates, Day 1 instant + Days 2–10 every 24h |
 | `Cancel-save · 3-touch` | `whop_event` on `membership.cancel_at_period_end_changed` (`payload_value=true`) | company-wide | active — 3 templates: Day 0 / Day 2 / Day 5. Each step `exit_if` `any_cancel_at_period_end is_false` (un-cancel exits the flow) |
 | `Past-due rescue · payment recovery` | `whop_event` on `payment.failed` | company-wide | **draft** — placeholder templates from migration 0015. 3 steps: Day 1 / Day 3 / Day 7. Each step `exit_if` `any_past_due_membership is_false` |
 | `Win-back · 60-day re-engagement` | `segment_added` | placeholder `segment_id` (operator wires before activating) | **draft** — placeholder templates from migration 0015. 3 steps: Day 0 / Day 7 / Day 14. Each step `exit_if` `lifecycle_stage neq churned` |

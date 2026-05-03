@@ -133,7 +133,7 @@ async function dispatch(
         (event.data as { plan?: { id?: string } } | null)?.plan?.id ?? null;
 
       // 1) whop_membership trigger — only on activation, fires the
-      //    welcome-style cadences (e.g. Build Room 10-day welcome).
+      //    welcome-style cadences (e.g. Free signup · 10-day welcome).
       if (t === "membership.activated") {
         const ids = await findCadencesForWhopMembership(db, planWhopId);
         await safeEnrollAll(

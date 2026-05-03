@@ -67,13 +67,12 @@ this plan are the "Lifetime AutomationFlow Pro" cohort above.
 The new paid product, focused on Claude Code / Codex training. Replaces
 AutomationFlow Pro as the paid offering.
 
-**Naming gotcha:** the cadence titled `Build Room · 10-day welcome` is
-**misnamed**. Its trigger is `plan_yRLG1PNR7m8Yh`, which is actually the
-**free AutomationFlow plan** ($0/$0, 18,954 memberships). So the cadence
-auto-enrolls new free signups, not paid Build Room buyers. `docs/SYSTEM.md`
-also describes it incorrectly. Possible secondary issue: the templates were
-authored for paid Build Room buyers but ship to free signups — copy
-audit recommended.
+A separate cadence, `Free signup · 10-day welcome` (renamed in migration
+0017 from its earlier "Build Room · 10-day welcome" misnomer), fires on
+new free AutomationFlow signups — `plan_yRLG1PNR7m8Yh`, ~19k historical
+memberships. Its 10 templates were originally authored under a "Build
+Room" working title (tags: `build-room`, `welcome-series`, `day-NN`) but
+ship to free signups; copy-audit is a separate open issue.
 
 ---
 
