@@ -280,6 +280,28 @@ export async function getGroup(id: string): Promise<Group> {
   return r.data;
 }
 
+// Lists every subscriber in the account (across all groups), cursor-paginated.
+// Used by the pull-subscriber-ids sync to populate users.mailerlite_subscriber_id.
+// Read-only: never adds or modifies subscribers in MailerLite.
+export async function listAllSubscribers(): Promise<GroupSubscriber[]> {
+  const out: GroupSubscriber[] = [];
+  let cursor: string | undefined;
+  while (true) {
+    const qs = cursor
+      ? `?limit=1000&cursor=${encodeURIComponent(cursor)}`
+      : "?limit=1000";
+    const r = await call<{
+      data: GroupSubscriber[];
+      meta?: { next_cursor?: string | null };
+    }>("GET", `/subscribers${qs}`);
+    out.push(...(r.data ?? []));
+    const next = r.meta?.next_cursor;
+    if (!next) break;
+    cursor = next;
+  }
+  return out;
+}
+
 export async function listGroupSubscribers(
   groupId: string,
   opts: {

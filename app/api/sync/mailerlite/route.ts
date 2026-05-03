@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-import { syncSubscribersToMailerLite } from "@/lib/mailerlite/sync";
+import {
+  pullSubscriberIdsFromMailerLite,
+  syncSubscribersToMailerLite,
+} from "@/lib/mailerlite/sync";
 import { checkSyncSecret } from "@/lib/sync-auth";
 
 export const dynamic = "force-dynamic";
@@ -13,9 +16,12 @@ export async function POST(request: Request) {
   const chunkSize = parseIntOrUndefined(url.searchParams.get("chunk_size"));
   const maxChunks = parseIntOrUndefined(url.searchParams.get("max_chunks"));
   const offset = parseIntOrUndefined(url.searchParams.get("offset"));
+  const pullOnly = url.searchParams.get("pull_only") === "true";
 
   try {
-    const result = await syncSubscribersToMailerLite({ chunkSize, maxChunks, offset });
+    const result = pullOnly
+      ? { pull: await pullSubscriberIdsFromMailerLite() }
+      : await syncSubscribersToMailerLite({ chunkSize, maxChunks, offset });
     return NextResponse.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

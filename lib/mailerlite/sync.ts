@@ -3,10 +3,21 @@ import {
   ensureField,
   findOrCreateGroup,
   importSubscribers,
+  listAllSubscribers,
   listFields,
   waitForImport,
   type ImportSubscriber,
 } from "./client";
+import { matchSubscribersToUsers } from "./match-subscribers";
+
+export type PullSubscriberIdsResult = {
+  total_subscribers: number;
+  total_users_examined: number;
+  matched: number;
+  updated: number;
+  started_at: string;
+  finished_at: string;
+};
 
 export type MailerLiteSyncResult = {
   group_id: string;
@@ -17,6 +28,7 @@ export type MailerLiteSyncResult = {
   total_processed: number;
   total_imported: number;
   remaining: number;
+  pull: PullSubscriberIdsResult;
   started_at: string;
   finished_at: string;
 };
@@ -129,6 +141,11 @@ export async function syncSubscribersToMailerLite(options: {
     .not("email", "is", null)
     .gt("total_ltv", 0);
 
+  // Reverse-direction sync: read all MailerLite subscribers and populate
+  // users.mailerlite_subscriber_id for any matching email. Idempotent —
+  // already-correct rows are skipped, no-ops on re-run.
+  const pull = await pullSubscriberIdsFromMailerLite();
+
   return {
     group_id: group.id,
     group_name: group.name,
@@ -138,6 +155,76 @@ export async function syncSubscribersToMailerLite(options: {
     total_processed,
     total_imported,
     remaining: Math.max(0, (remaining_count ?? 0) - offset),
+    pull,
+    started_at,
+    finished_at: new Date().toISOString(),
+  };
+}
+
+// Pulls all subscribers from MailerLite, matches by email to our users,
+// and populates users.mailerlite_subscriber_id where missing or different.
+// Read-only against MailerLite. Idempotent against our DB.
+export async function pullSubscriberIdsFromMailerLite(): Promise<PullSubscriberIdsResult> {
+  const started_at = new Date().toISOString();
+  const db = createAdminClient();
+
+  const subscribers = await listAllSubscribers();
+
+  type UserRow = {
+    id: string;
+    email: string | null;
+    mailerlite_subscriber_id: string | null;
+  };
+  const userRows: UserRow[] = [];
+  const userPageSize = 1000;
+  let userOffset = 0;
+  while (true) {
+    const { data, error } = await db
+      .from("users")
+      .select("id, email, mailerlite_subscriber_id")
+      .not("email", "is", null)
+      .order("id", { ascending: true })
+      .range(userOffset, userOffset + userPageSize - 1);
+    if (error) throw new Error(`users fetch failed: ${error.message}`);
+    const rows = (data ?? []) as UserRow[];
+    if (rows.length === 0) break;
+    userRows.push(...rows);
+    if (rows.length < userPageSize) break;
+    userOffset += userPageSize;
+  }
+
+  const matches = matchSubscribersToUsers(
+    subscribers
+      .filter((s) => Boolean(s.email))
+      .map((s) => ({ id: s.id, email: s.email })),
+    userRows.map((u) => ({ id: u.id, email: u.email })),
+  );
+
+  const currentByUserId = new Map(
+    userRows.map((u) => [u.id, u.mailerlite_subscriber_id]),
+  );
+  const updates = matches.filter(
+    (m) => currentByUserId.get(m.user_id) !== m.mailerlite_subscriber_id,
+  );
+
+  let updated = 0;
+  for (const m of updates) {
+    const { error } = await db
+      .from("users")
+      .update({ mailerlite_subscriber_id: m.mailerlite_subscriber_id })
+      .eq("id", m.user_id);
+    if (error) {
+      console.error(`pull: user ${m.user_id} update failed: ${error.message}`);
+      continue;
+    }
+    updated++;
+  }
+
+  return {
+    total_subscribers: subscribers.length,
+    total_users_examined: userRows.length,
+    matched: matches.length,
+    updated,
     started_at,
     finished_at: new Date().toISOString(),
   };
