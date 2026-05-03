@@ -2,7 +2,6 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
   ArrowLeft,
-  ArrowRight,
   GitBranch,
   Mail,
   Pause,
@@ -173,8 +172,8 @@ export default async function CadenceDetailPage(props: {
           <CardHeader>
             <CardTitle className="text-base">Sequence</CardTitle>
             <p className="text-xs text-muted-foreground">
-              Each step sends one email. Delay is measured from the prior step's
-              send time. Day 1's delay starts from enrollment.
+              Each step sends one email. Delay is measured from the prior step&apos;s
+              send time. Day 1&apos;s delay starts from enrollment.
             </p>
           </CardHeader>
           <CardContent>

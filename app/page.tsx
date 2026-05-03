@@ -144,7 +144,7 @@ export default async function Home(props: {
   // Build at-risk query: members with renewal_period_end in the next 30 days
   // AND either scheduled to cancel OR past_due, AND status still active-ish so
   // we don't surface long-canceled rows with stale flags.
-  let atRiskQuery = db
+  const atRiskQuery = db
     .from("memberships")
     .select(
       "id, status, cancel_at_period_end, renewal_period_end, cancellation_reason, products(title), users!inner(id, email, name)",
