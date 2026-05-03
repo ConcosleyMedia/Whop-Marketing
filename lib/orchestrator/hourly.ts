@@ -18,6 +18,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { evaluateSegment } from "@/lib/segments/evaluate";
 import { FilterJsonSchema } from "@/lib/segments/schema";
 import { enrollUserInCadence } from "@/lib/cadences/enroll";
+import { applyEnrollmentCap } from "./enrollment-cap";
 
 type Db = ReturnType<typeof createAdminClient>;
 
@@ -29,6 +30,7 @@ export type HourlySummary = {
   enrollments_created: number;
   enrollments_failed: number;
   cadence_failures: Array<{ cadence_id: string; user_id?: string; error: string }>;
+  per_cadence_enrollments: Record<string, number>;
 };
 
 export async function runHourlyOrchestrator(db: Db): Promise<{
@@ -43,6 +45,7 @@ export async function runHourlyOrchestrator(db: Db): Promise<{
     enrollments_created: 0,
     enrollments_failed: 0,
     cadence_failures: [],
+    per_cadence_enrollments: {},
   };
 
   // --- 1. Re-evaluate all dynamic segments ---
@@ -91,7 +94,7 @@ export async function runHourlyOrchestrator(db: Db): Promise<{
   // --- 2. Enroll segment-triggered cadences ---
   const { data: cadences } = await db
     .from("cadences")
-    .select("id, name, trigger_config")
+    .select("id, name, trigger_config, max_new_enrollments_per_run")
     .eq("status", "active")
     .eq("trigger_type", "segment_added");
 
@@ -99,8 +102,10 @@ export async function runHourlyOrchestrator(db: Db): Promise<{
     id: string;
     name: string;
     trigger_config: { segment_id?: string } | null;
+    max_new_enrollments_per_run: number | null;
   }>) {
     summary.cadences_processed++;
+    summary.per_cadence_enrollments[c.id] = 0;
     const segmentId = c.trigger_config?.segment_id;
     if (!segmentId) {
       summary.cadence_failures.push({
@@ -113,11 +118,13 @@ export async function runHourlyOrchestrator(db: Db): Promise<{
     // Find segment members not yet enrolled in this cadence.
     // Single SQL via RPC would be best; supabase-js doesn't support NOT IN
     // ergonomically against another query, so do two reads + a JS diff.
+    // ORDER BY user_id keeps the cap deterministic — see applyEnrollmentCap.
     const [{ data: members }, { data: existing }] = await Promise.all([
       db
         .from("segment_members")
         .select("user_id")
-        .eq("segment_id", segmentId),
+        .eq("segment_id", segmentId)
+        .order("user_id", { ascending: true }),
       db
         .from("cadence_enrollments")
         .select("user_id")
@@ -127,16 +134,23 @@ export async function runHourlyOrchestrator(db: Db): Promise<{
     const enrolledSet = new Set(
       ((existing ?? []) as Array<{ user_id: string }>).map((r) => r.user_id),
     );
-    const toEnroll = ((members ?? []) as Array<{ user_id: string }>)
+    const candidates = ((members ?? []) as Array<{ user_id: string }>)
       .map((r) => r.user_id)
       .filter((uid) => !enrolledSet.has(uid));
+    const toEnroll = applyEnrollmentCap(
+      candidates,
+      c.max_new_enrollments_per_run,
+    );
 
     for (const userId of toEnroll) {
       try {
         const r = await enrollUserInCadence(db, c.id, userId, {
           reason: `orchestrator.segment_added(${segmentId})`,
         });
-        if (r.ok && r.created) summary.enrollments_created++;
+        if (r.ok && r.created) {
+          summary.enrollments_created++;
+          summary.per_cadence_enrollments[c.id]++;
+        }
       } catch (err) {
         summary.enrollments_failed++;
         summary.cadence_failures.push({
