@@ -4,6 +4,18 @@
 
 import { z } from "zod";
 
+// Postgres enforces UUID structure on `::uuid` cast at insert time, so we
+// only need string-shape validation here. zod 4's `.uuid()` rejects our
+// deterministic seed UUIDs (`11111111-1111-1111-1111-e00000000001` etc.)
+// because they don't carry RFC 4122 variant/version bits. Use a permissive
+// hex-and-dashes regex instead so seeded cadences parse cleanly.
+const uuidLike = z
+  .string()
+  .regex(
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/,
+    "Must be a UUID",
+  );
+
 // `exit_if` is an optional filter evaluated before each step. If it
 // matches the user's CURRENT state (re-read at runtime, not at enrollment
 // time), the enrollment is exited with the given reason and no further
@@ -38,10 +50,10 @@ export type ExitConditionRuleT = z.infer<typeof ExitConditionRule>;
 
 export const SendEmailStep = z.object({
   type: z.literal("send_email"),
-  template_id: z.string().uuid(),
+  template_id: uuidLike,
   delay_hours: z.number().int().min(0).max(24 * 365),
   // Skip step if user is no longer in this segment at send time.
-  require_segment_id: z.string().uuid().optional(),
+  require_segment_id: uuidLike.optional(),
   // Exit the entire cadence if the rule matches at send time.
   exit_if: ExitCondition.optional(),
 });
@@ -63,7 +75,7 @@ export const TriggerConfigWhop = z.object({
 });
 
 export const TriggerConfigSegment = z.object({
-  segment_id: z.string().uuid(),
+  segment_id: uuidLike,
 });
 
 // New: trigger on any specific Whop webhook event type. Unlocks save-flow
