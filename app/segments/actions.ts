@@ -146,10 +146,10 @@ export async function attachCadenceToSegmentAction(formData: FormData) {
   if (cErr || !cadence) {
     failEdit(segmentId, cErr?.message ?? "Cadence not found.");
   }
-  if (cadence.status !== "draft") {
+  if (cadence.status !== "draft" && cadence.status !== "paused") {
     failEdit(
       segmentId,
-      `Cadence is ${cadence.status}; only draft cadences can be wired here.`,
+      `Cadence is ${cadence.status}; pause it first to rewire it here.`,
     );
   }
   if (cadence.trigger_type !== "segment_added") {

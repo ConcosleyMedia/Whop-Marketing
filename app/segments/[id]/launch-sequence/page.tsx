@@ -3,9 +3,10 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, Rocket } from "lucide-react";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { CadenceSequence } from "@/lib/cadences/types";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { attachCadenceToSegmentAction } from "@/app/segments/actions";
 
 export const dynamic = "force-dynamic";
@@ -29,17 +30,21 @@ export default async function LaunchSequencePage(props: {
     .maybeSingle();
   if (!segment) notFound();
 
+  // Surface draft AND paused cadences so the operator can wire a fresh one
+  // OR re-activate a paused sequence here. Active cadences are listed too
+  // (read-only) so the operator sees what's already running on this segment.
   const { data: cadences } = await db
     .from("cadences")
-    .select("id, name, description, sequence_json, trigger_config, max_new_enrollments_per_run")
-    .eq("status", "draft")
+    .select("id, name, description, status, sequence_json, trigger_config, max_new_enrollments_per_run")
     .eq("trigger_type", "segment_added")
+    .order("status", { ascending: true })
     .order("name", { ascending: true });
 
   const drafts = ((cadences ?? []) as Array<{
     id: string;
     name: string;
     description: string | null;
+    status: string;
     sequence_json: unknown;
     trigger_config: { segment_id?: string } | null;
     max_new_enrollments_per_run: number | null;
@@ -113,6 +118,18 @@ export default async function LaunchSequencePage(props: {
                       {c.name}
                     </Link>
                     <div className="flex flex-wrap gap-1.5">
+                      <Badge
+                        variant={
+                          c.status === "active"
+                            ? "default"
+                            : c.status === "paused"
+                              ? "outline"
+                              : "secondary"
+                        }
+                        className="text-[10px]"
+                      >
+                        {c.status}
+                      </Badge>
                       <Badge variant="secondary" className="text-[10px]">
                         {c.step_count} step{c.step_count === 1 ? "" : "s"}
                       </Badge>
@@ -133,15 +150,30 @@ export default async function LaunchSequencePage(props: {
                   )}
                 </CardHeader>
                 <CardContent className="flex items-center justify-between gap-3 pt-2">
-                  {wiredElsewhere ? (
+                  {c.status === "active" && alreadyWiredHere ? (
                     <p className="text-xs text-muted-foreground">
-                      Currently pointed at a different segment — launching
-                      here will rewire it.
+                      Currently active and wired here. Pause it on{" "}
+                      <Link
+                        href={`/cadences/${c.id}`}
+                        className="underline"
+                      >
+                        the cadence page
+                      </Link>{" "}
+                      first if you want to swap.
+                    </p>
+                  ) : c.status === "active" && wiredElsewhere ? (
+                    <p className="text-xs text-muted-foreground">
+                      Active on a different segment. Pause it first to rewire
+                      here.
+                    </p>
+                  ) : wiredElsewhere ? (
+                    <p className="text-xs text-muted-foreground">
+                      Currently pointed at a different segment — wiring here
+                      will rewire it.
                     </p>
                   ) : alreadyWiredHere ? (
                     <p className="text-xs text-muted-foreground">
-                      Already pointed here. Re-launching just flips status to
-                      active.
+                      Already pointed here. Wiring just flips status to active.
                     </p>
                   ) : (
                     <p className="text-xs text-muted-foreground">
@@ -152,14 +184,26 @@ export default async function LaunchSequencePage(props: {
                       and activate it.
                     </p>
                   )}
-                  <form action={attachCadenceToSegmentAction}>
-                    <input type="hidden" name="segment_id" value={id} />
-                    <input type="hidden" name="cadence_id" value={c.id} />
-                    <Button type="submit" size="sm" className="gap-1.5">
-                      <Rocket className="h-3.5 w-3.5" />
-                      Wire & activate
-                    </Button>
-                  </form>
+                  {c.status === "active" ? (
+                    <Link
+                      href={`/cadences/${c.id}`}
+                      className={cn(
+                        buttonVariants({ size: "sm", variant: "outline" }),
+                        "gap-1.5",
+                      )}
+                    >
+                      View running
+                    </Link>
+                  ) : (
+                    <form action={attachCadenceToSegmentAction}>
+                      <input type="hidden" name="segment_id" value={id} />
+                      <input type="hidden" name="cadence_id" value={c.id} />
+                      <Button type="submit" size="sm" className="gap-1.5">
+                        <Rocket className="h-3.5 w-3.5" />
+                        Wire & activate
+                      </Button>
+                    </form>
+                  )}
                 </CardContent>
               </Card>
             );
