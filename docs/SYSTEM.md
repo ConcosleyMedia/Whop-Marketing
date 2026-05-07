@@ -342,7 +342,13 @@ Score clamped 0..100.
 80+ hot · 50-79 warm · 20-49 cold · 0-19 at_risk
 
 ### Lifecycle derivation
-`hasActiveMembership` → active. `hasEverHadMembership` → churned. else prospect.
+Per ADR-0002 (canonical mapping):
+`active` if any healthy-active membership (active/trialing/completed,
+no cancel_at_period_end). Else `canceling` if any past_due or
+active/trialing-with-cancel-flag. Else `churned` if any non-drafted
+membership ever. Else `prospect`. Same logic in `lib/scoring/compute.ts`,
+`segment_eligibility_view`, and `user_marketing_view` — keep all three
+in sync (consolidating to one is on the followup list).
 
 ### Triggers for re-score
 - Inline on every Whop + MailerLite webhook event (real-time)
@@ -470,13 +476,17 @@ past-due rescue when their card works, stop win-back when they re-purchase.
 | Cadence | Trigger | Scope | Status |
 |---|---|---|---|
 | `Free signup · 10-day welcome` | `whop_membership` | plan `plan_yRLG1PNR7m8Yh` (free AutomationFlow) only | active — 10 templates, Day 1 instant + Days 2–10 every 24h |
-| `Cancel-save · 3-touch` | `whop_event` on `membership.cancel_at_period_end_changed` (`payload_value=true`) | company-wide | active — 3 templates: Day 0 / Day 2 / Day 5. Each step `exit_if` `any_cancel_at_period_end is_false` (un-cancel exits the flow) |
+| `Cancel-save · 3-touch` | `whop_event` on `membership.cancel_at_period_end_changed` (`payload_value=true`) | company-wide | active — 3 templates: Day 0 / Day 2 / Day 5. Each step `exit_if` `any_cancel_at_period_end is_false` |
 | `Past-due rescue · payment recovery` | `whop_event` on `payment.failed` | company-wide | **draft** — placeholder templates from migration 0015. 3 steps: Day 1 / Day 3 / Day 7. Each step `exit_if` `any_past_due_membership is_false` |
-| `Win-back · 60-day re-engagement` | `segment_added` | placeholder `segment_id` (operator wires before activating) | **draft** — placeholder templates from migration 0015. 3 steps: Day 0 / Day 7 / Day 14. Each step `exit_if` `lifecycle_stage neq churned` |
+| `Win-back · 60-day re-engagement` | `segment_added` → Lapsed buyers | 1,432 paid-churned users | active (cap=178/run) — 3 templates with real copy (migration 0020): Day 0 acknowledge / Day 7 what changed / Day 14 door open. Each step `exit_if` `lifecycle_stage neq churned OR any_active_membership is_true` |
+| `Welcome backfill · 4-touch (2-week)` | `segment_added` → Free signup welcome backfill | 12,556 active free signups >30d old | **paused** (migration 0022) — 4 emails recycled from the welcome series strongest 4: Day 1 → 4 → 5 → 6. Cap 178/run = ~71 days to clear cohort. Operator flips active when ready. |
+| `Lapsed buyers · 4-touch ($50K hook)` | `segment_added` → Lapsed buyers | 1,432 paid-churned users (overlaps with Win-back · 60-day) | **paused** (migration 0024) — 4 templates: narrative / argument / explainer / pitch. Pick this OR Win-back, not both. |
+| `Pilot 0 · Free silent reactivation` | `manual` → Free silent segment | 302 truly-churned free signups | **paused** (migration 0019, paused by 0021) — 4 templates authored to whitepaper voice. Cohort smaller than originally sized (15k → 302) after the lifecycle fix; operator decides next move. |
 
-The two `draft` cadences need their templates populated (see `/templates`,
-filter by label `lifecycle`) and — for win-back — `trigger_config.segment_id`
-wired to a real segment before the operator flips status to `active`.
+The `Past-due rescue` cadence still needs its templates populated (see
+`/templates` filtered to that campaign). The two paused 4-touch
+campaigns can be activated via `/segments/[id]/launch-sequence` — pick
+one, click Wire & activate, orchestrator enrolls on next `:23` tick.
 
 ---
 
@@ -700,20 +710,27 @@ vercel.json                      # 4 cron schedules
 6. **MailerLite flips campaign.status to "sent" on schedule acceptance**, not on actual delivery. `finished_at` is the only honest "did it really send" signal. `app/campaigns/page.tsx` derives "sending" vs "sent" using this.
 7. **Per-user MailerLite groups** (`crm-user-<uuid>`) accumulate over time. Cleanup is on the future-work list.
 8. **`segment_eligibility_view` is the single source of truth** for filterable user attributes. Always add new fields here, then whitelist in `lib/segments/schema.ts`.
+9. **Two views with duplicated lifecycle derivation.** `segment_eligibility_view` (segments + cadence engine) and `user_marketing_view` (dashboard, /users, /groups, /users/[id]) both compute lifecycle independently. Migration 0021 fixed one but missed the other; migration 0025 caught up. If you change the canonical mapping again, update both AND `lib/scoring/{compute,fetch}.ts`. Consolidating to one source is on the followup list.
+10. **Zod 4 strict UUID validator rejects deterministic seed UUIDs.** Patterns like `11111111-1111-1111-1111-e00000000001` lack RFC 4122 variant/version bits. `lib/cadences/types.ts` uses a permissive `uuidLike` regex instead — Postgres validates structure on `::uuid` cast, so the strictness in app code wasn't adding safety, just breaking parse for every seeded cadence (which silently broke `enrollUserInCadence`).
+11. **email_events.event_type is `'opened'` and `'clicked'` (past tense).** A typo in migrations 0007 and 0021 had views filtering on `'open'`/`'click'` and silently returning 0 for `opens_30d`/`clicks_30d`/`last_open_at`. Fixed in migration 0023. The lead-scoring engine in `fetch.ts` was always correct.
 
 ---
 
 ## 15. Whop membership statuses
 
-| Status | Meaning |
-|---|---|
-| `drafted` | Checkout started, never completed. No money changed hands. |
-| `trialing` | In a free trial period |
-| `active` | Currently has access, paying on a recurring cycle |
-| `past_due` | Recurring payment failed but still in grace period |
-| `canceled` | User explicitly cancelled. May still have access until period ends. |
-| `expired` | Term ended, access revoked |
-| `completed` | Membership finished cleanly — fixed-duration product reached its end, or one-time purchase delivered. **Different from canceled** |
+| Status | Meaning | Maps to lifecycle |
+|---|---|---|
+| `drafted` | Checkout started, never completed. No money changed hands. | **prospect** (per ADR-0002) — never a real member |
+| `trialing` | In a free trial period | active (or canceling if cancel_at_period_end=true) |
+| `active` | Currently has access, paying on a recurring cycle | active (or canceling if cancel_at_period_end=true) |
+| `past_due` | Recurring payment failed but still in grace period | **canceling** — access at risk |
+| `canceled` | User explicitly cancelled, no longer has access | **churned** |
+| `expired` | Term ended, access revoked | **churned** |
+| `completed` | Membership finished cleanly — fixed-duration product reached its end, lifetime delivery, or one-time access pass | **active** — user still effectively has the product |
+
+Free-community pass + lifetime AutomationFlow Pro both land in `completed`
+while the user still holds access — that's why the canonical mapping
+(ADR-0002) treats `completed` as `active`, not as ex-membership.
 
 A single user can have multiple membership rows for the same product (e.g.,
 2 × `drafted`, 1 × `completed`, 2 × `active`) reflecting their full history.
@@ -791,14 +808,23 @@ migration 0015) — it just needs the segment wired:
 
 - ✅ **`whop_event` trigger type** — shipped in [3e4c1bb](https://github.com/ConcosleyMedia/Whop-Marketing/commit/3e4c1bb). See §8.
 - ✅ **Per-step exit conditions (`exit_if`)** — shipped in [3e4c1bb](https://github.com/ConcosleyMedia/Whop-Marketing/commit/3e4c1bb). See §8.
-- ✅ **Past-due rescue + win-back cadence seeds** — shipped as drafts in
-  [1efe08f](https://github.com/ConcosleyMedia/Whop-Marketing/commit/1efe08f); cancel-save dedup in [b548f68](https://github.com/ConcosleyMedia/Whop-Marketing/commit/b548f68).
+- ✅ **Per-cadence enrollment cap** — `max_new_enrollments_per_run` (migration 0018, [c9839ca](https://github.com/ConcosleyMedia/Whop-Marketing/commit/c9839ca)) for AUP-safe staging.
+- ✅ **Past-due rescue + win-back cadence seeds** — shipped as drafts in [1efe08f](https://github.com/ConcosleyMedia/Whop-Marketing/commit/1efe08f); cancel-save dedup in [b548f68](https://github.com/ConcosleyMedia/Whop-Marketing/commit/b548f68); win-back templates with real copy in [9a92e33](https://github.com/ConcosleyMedia/Whop-Marketing/commit/9a92e33).
+- ✅ **Pilot 0 + Welcome backfill + Lapsed buyers campaigns** — three 4-touch cadences shipped in migrations 0019/0022/0024. Pilot 0 paused after the cohort shrank from 15k → 302 with the lifecycle fix.
+- ✅ **Canonical lifecycle mapping** — completed=active, drafted=prospect, +canceling stage. ADR-0002. Migrations 0021 + 0025 (fixes both views), commits [ac8cea6](https://github.com/ConcosleyMedia/Whop-Marketing/commit/ac8cea6) + [01288c9](https://github.com/ConcosleyMedia/Whop-Marketing/commit/01288c9).
+- ✅ **Templates page redesigned** — campaign-grouped, day-ordered ([871eed2](https://github.com/ConcosleyMedia/Whop-Marketing/commit/871eed2)).
+- ✅ **Live HTML preview on `/campaigns/new`** + **launch-sequence flow on `/segments/[id]`** ([267ba23](https://github.com/ConcosleyMedia/Whop-Marketing/commit/267ba23), [b54e78b](https://github.com/ConcosleyMedia/Whop-Marketing/commit/b54e78b)). Wire any draft/paused segment_added cadence to a segment with one click.
+- ✅ **Wired-segment visibility** on `/cadences/[id]` and the launch-sequence card list ([912e63e](https://github.com/ConcosleyMedia/Whop-Marketing/commit/912e63e)).
+- ✅ **email_events typo fix** — view filters were on `'open'`/`'click'` instead of `'opened'`/`'clicked'`, silently zeroing all engagement metrics in segments. Migration 0023.
+- ✅ **Zod 4 UUID compatibility** — `lib/cadences/types.ts` now uses a permissive regex; deterministic seed UUIDs no longer fail parse (silent enrollment break before this fix).
 
 ### Still missing (priority order)
 
-1. **Segment-exit triggers** — symmetric with `segment_added`. "When user leaves segment X, enroll in cadence Y." Or "exit cadence Y when leaves segment X." (`exit_if` partially covers the second use case but is per-step, not segment-aware.)
-2. **Step branching** — `next_if(condition) → step_a, else → step_b`. Supports email A/B paths.
-3. **Action types beyond email** — tag user, update field, fire external webhook, post to Slack.
-4. **LLM step type** — for content personalization (not for routing decisions).
-5. **Cadence builder UI** — `/cadences/new` page with trigger picker + per-step editor exposing `exit_if`. Currently authoring is SQL-migration-only; fine while there are <10 cadences but a tax on iteration speed beyond that.
-6. **Per-user MailerLite group cleanup** — purge `crm-user-*` groups for users who completed every cadence > 30 days ago.
+1. **Consolidate the two lifecycle views.** `segment_eligibility_view` and `user_marketing_view` both derive lifecycle independently. Two outages this far have come from updating one and missing the other (migration 0021 → 0025 caught up, migration 0007 → 0023 caught up the open/click typo). Either replace one view with a SELECT from the other, or extract derivation into a SQL function called from both. Quirk #9 in §14.
+2. **Segment-exit triggers** — symmetric with `segment_added`. "When user leaves segment X, enroll in cadence Y." (`exit_if` partially covers the second use case but is per-step, not segment-aware.)
+3. **Step branching** — `next_if(condition) → step_a, else → step_b`. Supports email A/B paths.
+4. **Action types beyond email** — tag user, update field, fire external webhook, post to Slack.
+5. **LLM step type** — for content personalization (not for routing decisions).
+6. **Cadence builder UI** — `/cadences/new` page with trigger picker + per-step editor exposing `exit_if`. Currently authoring is SQL-migration-only. Partial workaround shipped: `/segments/[id]/launch-sequence` lets the operator wire an existing draft/paused cadence to a segment without SQL.
+7. **Per-user MailerLite group cleanup** — purge `crm-user-*` groups for users who completed every cadence > 30 days ago.
+8. **Single `lifecycle_stage` source.** Currently the column on `users` is a cache, fed by the scoring engine on every webhook. The two views compute it independently. The cache can drift if a webhook fails and the rescore cron hasn't caught up. Single-source-of-truth would be a function/view, not a cached column.

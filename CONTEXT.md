@@ -9,42 +9,65 @@ the other — never let the language drift.
 ## Customer-state vocabulary
 
 ### Lifecycle stage (`users.lifecycle_stage`)
-Derived from membership status (see `lib/scoring/`):
-- `active` — has at least one active membership *of any kind, including free
-  and lifetime*
-- `churned` — has had at least one membership in the past, none active now
-- `prospect` — has never had a membership
 
-**Lifecycle stage alone does NOT distinguish paying from non-paying members,
-nor recurring from one-time buyers.** A free-community member with no
-purchases reads as `active` with `total_ltv = 0`. A lifetime AutomationFlow
-Pro buyer also reads as `active` (forever) with `total_ltv = $60–90`. For
-real audience targeting, always combine `lifecycle_stage`, `total_ltv`, AND
+Derived from membership status per ADR-0002 (the operator-canonical
+mapping; see `lib/scoring/compute.ts` and the two views below).
+
+| Stage      | Means                                            | From Whop statuses |
+|------------|--------------------------------------------------|--------------------|
+| `active`   | currently has access                             | `active` / `trialing` / `completed` (no cancel_at_period_end) |
+| `canceling`| has access but it's going away                   | `past_due`, OR `active`/`trialing` + cancel_at_period_end=true |
+| `churned`  | real ex-customer, no current access              | `canceled` / `expired` |
+| `prospect` | never a real member                              | `drafted` only, or no memberships |
+
+`completed` is "active" because for lifetime products, free-community
+passes, and one-time deliveries Whop marks the membership `completed`
+at the moment the user receives access cleanly — they keep it. `drafted`
+is "prospect" because those are abandoned checkouts, not members.
+
+**Lifecycle alone does NOT distinguish paying from non-paying.** A
+free-community member reads as `active` with `total_ltv = 0`. A lifetime
+Pro buyer also reads as `active` with `total_ltv = $60–90`. For real
+audience targeting always combine `lifecycle_stage`, `total_ltv`, AND
 the underlying plan.
+
+**The mapping is duplicated in three places** that must stay in sync:
+`lib/scoring/{compute,fetch}.ts` (writes `users.lifecycle_stage` on
+every webhook), `segment_eligibility_view` (segments + cadence engine),
+and `user_marketing_view` (user-facing pages). Consolidating to a single
+view is on the followup list.
 
 ### Cohort matrix (operator-facing)
 
 The operator thinks in cohorts that combine lifecycle, payment shape, and
 engagement. These names are the canonical labels used in cadence/segment
-descriptions.
+descriptions. Counts below reflect the corrected lifecycle mapping
+(2026-05-07; the original counts were skewed by misclassification).
 
-| Cohort | `lifecycle_stage` | Payment shape | Count (May 2026) | Operator policy |
+| Cohort | `lifecycle_stage` | Payment shape | Count | Operator policy |
 |---|---|---|---|---|
-| **Free silent** | `churned` | `total_ltv = 0` | **15,022** (15,007 never engaged) | **TARGET** — primary nurture audience |
-| **Lifetime AutomationFlow Pro** | `active` | one-time payment, $25–199 historical (cluster at $79) | ~90–115 | **Bespoke transition send** — single campaign offering 3 months free Build Room. They already know Pro is sunsetting; no need to re-explain. |
-| **Paid recurring active** | `active` | recurring sub, paying now | ~250 | **DO NOT TOUCH** — "lazy non-cancellers"; poking risks waking them up to cancel |
-| **Paid recurring churned** | `churned` | `total_ltv > 0`, had recurring sub | 1,801 | low priority — classic win-back, deferred |
-| **Free churned (tire-kickers)** | `churned` | `total_ltv = 0`, joined free, never returned | overlaps with Free silent definition above | merged into Free silent — distinguishing them isn't worth the complexity |
+| **Active free community** | `active` | `total_ltv = 0`, free AutomationFlow | ~12,793 | **Welcome backfill in flight** — 4-touch cadence for those who joined >30 days ago and never received the welcome series (~12,556 eligible) |
+| **Lifetime AutomationFlow Pro** | `active` (status=completed) | one-time $25–199 (cluster at $79) | ~90 | **Bespoke transition send** planned — single campaign offering 3 months free Build Room |
+| **Paid recurring active** | `active` | recurring sub, paying now | ~244 | **DO NOT TOUCH** — "lazy non-cancellers"; poking risks waking them up to cancel |
+| **Lapsed buyers** | `churned` | `total_ltv > 0`, last purchase >90d ago | 1,432 | **Targeted by Win-back · 60-day (active)** and **Lapsed buyers · 4-touch ($50K hook)** (paused) — pick one |
+| **True Free silent** | `churned` | `total_ltv = 0`, canceled/expired free signup | 302 | small cohort — Pilot 0 cadence is paused pending audience re-pick |
+| **Drafted-only (abandoned signups)** | `prospect` | never finalized signup | 2,115 | not customers — do not email as ex-members |
 
-**Important:** Free silent are `lifecycle_stage = 'churned'`, not `'active'`. Whop free
-AutomationFlow memberships transition out of `active` over time, so the cohort
-shows as churned in the data. Earlier confusion in this doc has been corrected.
+**Important:** the original "Free silent ~15k" was almost entirely
+misclassification — Whop's `completed` status (free community pass,
+lifetimes) was being treated as ex-membership, and `drafted` (abandoned
+signups) as ex-members. With the canonical mapping (ADR-0002) the true
+Free silent cohort is ~302 users. The much larger 12,793-user pool
+historically called "Free silent" are ACTIVE free-community members who
+just never engaged with email — they're the welcome-backfill audience.
 
-"Inactive 15k" in operator language means **Free silent** specifically — not
-the broader "anyone who hasn't engaged."
+"Inactive 15k" in earlier operator language conflated these two cohorts.
+Going forward use **active free community** (engagement target) and
+**true Free silent** (real reactivation) as separate names.
 
-The "ignore currently-paying" posture is *current*, not permanent. Re-evaluate
-after the new Build Room product is established and revenue is stable.
+The "ignore currently-paying" posture is *current*, not permanent.
+Re-evaluate after the new Build Room product is established and revenue
+is stable.
 
 ---
 
