@@ -39,6 +39,11 @@ yarn-error.log*
 
 # editor / agent local config
 /.claude
+/.agents
+/skills-lock.json
+
+# internal drafts not for source control
+/BuildRoom_Email_Whitepaper.docx
 
 # typescript
 *.tsbuildinfo
