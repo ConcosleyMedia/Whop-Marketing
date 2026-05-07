@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, Filter, RefreshCw, Send, Upload } from "lucide-react";
+import { ArrowLeft, Filter, RefreshCw, Rocket, Send, Upload } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -55,7 +55,7 @@ function lifecycleTone(
 
 export default async function SegmentDetailPage(props: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ error?: string; synced?: string }>;
+  searchParams: Promise<{ error?: string; synced?: string; launched?: string }>;
 }) {
   const { id } = await props.params;
   const sp = await props.searchParams;
@@ -132,6 +132,16 @@ export default async function SegmentDetailPage(props: {
             </Button>
           </form>
           <Link
+            href={`/segments/${segment.id}/launch-sequence`}
+            className={cn(
+              buttonVariants({ size: "sm", variant: "outline" }),
+              "gap-1.5",
+            )}
+          >
+            <Rocket className="h-3.5 w-3.5" />
+            Launch sequence
+          </Link>
+          <Link
             href={`/campaigns/new?segment=${segment.id}`}
             className={cn(
               buttonVariants({ size: "sm" }),
@@ -139,7 +149,7 @@ export default async function SegmentDetailPage(props: {
             )}
           >
             <Send className="h-3.5 w-3.5" />
-            Send campaign
+            Send single broadcast
           </Link>
           <DeleteSegmentButton id={segment.id} />
         </div>
@@ -153,6 +163,12 @@ export default async function SegmentDetailPage(props: {
       {sp.synced && (
         <div className="mb-4 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400">
           Synced to MailerLite · {sp.synced}
+        </div>
+      )}
+      {sp.launched && (
+        <div className="mb-4 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400">
+          Launched · {sp.launched} is now active. The orchestrator picks up
+          enrollments on the next hourly tick.
         </div>
       )}
 

@@ -122,3 +122,53 @@ export async function deleteSegmentAction(formData: FormData) {
   revalidatePath("/segments");
   redirect("/segments");
 }
+
+// Wire an existing draft cadence to this segment and activate it. Closes the
+// "select segment → launch a 4-email sequence" loop without requiring a full
+// cadence-builder UI. Cadence must be in `draft` status — operator picks it
+// from the launch-sequence page, this action sets trigger_config.segment_id
+// to the segment and flips status to 'active' atomically. The hourly
+// orchestrator picks up enrollments on the next tick.
+export async function attachCadenceToSegmentAction(formData: FormData) {
+  const segmentId = String(formData.get("segment_id") ?? "").trim();
+  const cadenceId = String(formData.get("cadence_id") ?? "").trim();
+  if (!segmentId || !cadenceId) {
+    failEdit(segmentId || "missing", "Missing segment or cadence id.");
+  }
+
+  const db = createAdminClient();
+
+  const { data: cadence, error: cErr } = await db
+    .from("cadences")
+    .select("id, name, status, trigger_type, trigger_config")
+    .eq("id", cadenceId)
+    .maybeSingle();
+  if (cErr || !cadence) {
+    failEdit(segmentId, cErr?.message ?? "Cadence not found.");
+  }
+  if (cadence.status !== "draft") {
+    failEdit(
+      segmentId,
+      `Cadence is ${cadence.status}; only draft cadences can be wired here.`,
+    );
+  }
+  if (cadence.trigger_type !== "segment_added") {
+    failEdit(
+      segmentId,
+      `Cadence trigger is ${cadence.trigger_type}; only segment_added cadences can be wired here.`,
+    );
+  }
+
+  const newConfig = { ...(cadence.trigger_config ?? {}), segment_id: segmentId };
+  const { error: uErr } = await db
+    .from("cadences")
+    .update({ trigger_config: newConfig, status: "active" })
+    .eq("id", cadenceId);
+  if (uErr) failEdit(segmentId, `Update failed: ${uErr.message}`);
+
+  revalidatePath(`/segments/${segmentId}`);
+  revalidatePath(`/cadences/${cadenceId}`);
+  const u = new URL(`/segments/${segmentId}`, "http://placeholder");
+  u.searchParams.set("launched", cadence.name ?? cadenceId);
+  redirect(u.pathname + "?" + u.searchParams.toString());
+}
