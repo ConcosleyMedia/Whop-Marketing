@@ -23,6 +23,12 @@
    ```
    Then re-run the segment query — `member_count` should be in the thousands.
 
+3. **Force a rescore** if recent signups are showing null `lifecycle_stage`:
+   ```bash
+   curl -X POST 'https://<domain>/api/sync/rescore?limit=500' -H "x-sync-secret: $SYNC_SECRET"
+   ```
+   Otherwise the nightly rescore (`17 8 * * *` UTC) catches them on the next pass. The Day 1 enrollment query filters to `lifecycle_stage = 'churned'` defensively, so a stale subset just defers eligibility — nobody enrolls in a broken state.
+
 3. **Render-test all 4 templates** in `/templates` (filter label `pilot-0`). Send a test to your own inbox via the editor's Send Test form. Check on desktop Gmail and iOS Mail at minimum.
 
 4. **Sender warmth:** confirm MailerLite reports the sender domain as warm. Pilot 0 sends ~400 emails over 18 days — well within tolerance, but if the domain has been quiet for >30 days, send a small (50-recipient) internal warm-up campaign first.
@@ -39,6 +45,13 @@ Run this once per day, mid-morning (after the segment has been re-evaluated by t
 --   • the Free signup welcome cadence (id 9bdb0f77-...)
 --   • Pilot 0 itself (avoid duplicates across days)
 -- "Newest" = users.first_seen_at DESC (most recent Whop signup first).
+--
+-- IMPORTANT: requires u.lifecycle_stage = 'churned' explicitly. The segment
+-- uses segment_eligibility_view which derives lifecycle on-the-fly, but the
+-- cadence's exit_if reads users.lifecycle_stage at runtime. Recently
+-- backfilled users can be in the segment yet have a null lifecycle_stage —
+-- enrolling them would trigger immediate exit (null != 'churned' is true).
+-- The nightly rescore (08:17 UTC) populates these; this filter is defensive.
 
 WITH pilot AS (SELECT '22222222-2222-2222-2222-f00000000001'::uuid AS cadence_id),
 candidates AS (
@@ -47,13 +60,14 @@ candidates AS (
   JOIN segment_members sm
     ON sm.user_id = u.id
    AND sm.segment_id = '33333333-3333-3333-3333-f00000000001'::uuid
-  WHERE u.id NOT IN (
-    SELECT user_id FROM cadence_enrollments
-    WHERE cadence_id IN (
-      '9bdb0f77-2871-4ad9-baab-c7ed695860b8'::uuid,           -- Free signup welcome
-      (SELECT cadence_id FROM pilot)                           -- Pilot 0 itself
+  WHERE u.lifecycle_stage = 'churned'
+    AND u.id NOT IN (
+      SELECT user_id FROM cadence_enrollments
+      WHERE cadence_id IN (
+        '9bdb0f77-2871-4ad9-baab-c7ed695860b8'::uuid,         -- Free signup welcome
+        (SELECT cadence_id FROM pilot)                         -- Pilot 0 itself
+      )
     )
-  )
   ORDER BY u.first_seen_at DESC NULLS LAST
   LIMIT 100
 )
