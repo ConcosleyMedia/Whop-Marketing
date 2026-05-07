@@ -54,6 +54,21 @@ export default async function CadenceDetailPage(props: {
     ((templates ?? []) as Array<{ id: string; name: string }>).map((t) => [t.id, t.name]),
   );
 
+  // Resolve the wired segment so the operator sees "this fires when users
+  // join SegmentX (1,432 users)" instead of just the trigger type.
+  const wiredSegmentId =
+    (cadence.trigger_config as { segment_id?: string } | null)?.segment_id ??
+    null;
+  const { data: wiredSegment } =
+    wiredSegmentId &&
+    wiredSegmentId !== "00000000-0000-0000-0000-000000000000"
+      ? await db
+          .from("segments")
+          .select("id, name, member_count")
+          .eq("id", wiredSegmentId)
+          .maybeSingle()
+      : { data: null };
+
   const { data: enrollments } = await db
     .from("cadence_enrollments")
     .select(
@@ -166,6 +181,41 @@ export default async function CadenceDetailPage(props: {
         <Stat label="In flight" value={String(statusCounts.active ?? 0)} />
         <Stat label="Completed" value={String(statusCounts.completed ?? 0)} />
       </div>
+
+      {cadence.trigger_type === "segment_added" && (
+        <Card className="mb-6">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+            <div className="min-w-0">
+              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Wired segment
+              </div>
+              {wiredSegment ? (
+                <div className="mt-1">
+                  <Link
+                    href={`/segments/${wiredSegment.id}`}
+                    className="text-base font-semibold hover:underline"
+                  >
+                    {wiredSegment.name}
+                  </Link>
+                  <span className="ml-2 text-sm text-muted-foreground tabular-nums">
+                    {(wiredSegment.member_count ?? 0).toLocaleString()} users
+                  </span>
+                </div>
+              ) : (
+                <div className="mt-1 text-sm text-muted-foreground">
+                  Not wired yet — pick a segment via{" "}
+                  <span className="font-medium">Launch sequence</span> on any
+                  segment page, or set{" "}
+                  <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                    trigger_config.segment_id
+                  </code>{" "}
+                  manually.
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]">
         <Card>

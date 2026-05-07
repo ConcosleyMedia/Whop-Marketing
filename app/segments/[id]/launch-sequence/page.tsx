@@ -40,7 +40,7 @@ export default async function LaunchSequencePage(props: {
     .order("status", { ascending: true })
     .order("name", { ascending: true });
 
-  const drafts = ((cadences ?? []) as Array<{
+  const cadenceList = ((cadences ?? []) as Array<{
     id: string;
     name: string;
     description: string | null;
@@ -48,17 +48,50 @@ export default async function LaunchSequencePage(props: {
     sequence_json: unknown;
     trigger_config: { segment_id?: string } | null;
     max_new_enrollments_per_run: number | null;
-  }>).map((c) => {
+  }>);
+
+  // Resolve segment names for any cadence pointing at a non-placeholder
+  // segment, so each card can render "currently wired to: SegmentX".
+  const otherSegmentIds = Array.from(
+    new Set(
+      cadenceList
+        .map((c) => c.trigger_config?.segment_id)
+        .filter(
+          (sid): sid is string =>
+            !!sid && sid !== "00000000-0000-0000-0000-000000000000",
+        ),
+    ),
+  );
+  const { data: otherSegments } =
+    otherSegmentIds.length > 0
+      ? await db
+          .from("segments")
+          .select("id, name")
+          .in("id", otherSegmentIds)
+      : { data: [] };
+  const segmentNameById = new Map<string, string>(
+    ((otherSegments ?? []) as Array<{ id: string; name: string }>).map((s) => [
+      s.id,
+      s.name,
+    ]),
+  );
+
+  const drafts = cadenceList.map((c) => {
     const parsed = CadenceSequence.safeParse(c.sequence_json);
     const stepCount = parsed.success ? parsed.data.steps.length : 0;
     const totalDelay = parsed.success
       ? parsed.data.steps.reduce((sum, s) => sum + s.delay_hours, 0)
       : 0;
+    const pointedAt = c.trigger_config?.segment_id ?? null;
     return {
       ...c,
       step_count: stepCount,
       duration_days: Math.round((totalDelay / 24) * 10) / 10,
-      currently_pointed_at: c.trigger_config?.segment_id ?? null,
+      currently_pointed_at: pointedAt,
+      currently_pointed_at_name:
+        pointedAt && pointedAt !== "00000000-0000-0000-0000-000000000000"
+          ? (segmentNameById.get(pointedAt) ?? "(unknown segment)")
+          : null,
     };
   });
 
@@ -148,6 +181,16 @@ export default async function LaunchSequencePage(props: {
                       {c.description}
                     </p>
                   )}
+                  <p className="mt-1 text-[11px] uppercase tracking-wide text-muted-foreground">
+                    Currently wired to:{" "}
+                    <span className="normal-case text-foreground">
+                      {alreadyWiredHere
+                        ? `${segment.name} (this one)`
+                        : c.currently_pointed_at_name
+                          ? c.currently_pointed_at_name
+                          : "— not wired"}
+                    </span>
+                  </p>
                 </CardHeader>
                 <CardContent className="flex items-center justify-between gap-3 pt-2">
                   {c.status === "active" && alreadyWiredHere ? (
