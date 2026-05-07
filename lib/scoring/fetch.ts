@@ -1,13 +1,40 @@
 // Aggregate the signals a single user needs to be scored. Five parallel
 // queries against already-indexed columns. Stays well under 100ms at our
 // scale (~17k users, per-user aggregates are tiny).
+//
+// Membership status semantics (see docs/SYSTEM.md §15 + CONTEXT.md):
+//   active / trialing   → currently has access, billing is healthy
+//   completed           → membership ended cleanly with access intact
+//                         (lifetime products, free community pass, one-time
+//                         course delivered). User still effectively a member.
+//   past_due            → recurring payment failed, in grace period.
+//                         Access is at risk → "canceling" lifecycle.
+//   cancel_at_period_end on an active/trialing row → user clicked cancel,
+//                         still has access til period end → "canceling".
+//   canceled / expired  → no access; user has truly left.
+//   drafted             → checkout started, never finalized. Never a member.
 
 import type { createAdminClient } from "@/lib/supabase/admin";
 import type { ScoreSignals } from "./compute";
 
 type Db = ReturnType<typeof createAdminClient>;
 
-const ACTIVE_MEMBERSHIP_STATUSES = ["active", "trialing", "past_due"];
+// Statuses where the user effectively HAS the product right now.
+// completed is here because lifetimes / free-community / one-time access
+// products land in this status when delivered, and the user keeps access.
+const HEALTHY_ACTIVE_STATUSES = ["active", "trialing", "completed"];
+
+// Statuses that count as "real" memberships for the prospect/churned distinction.
+// Excludes drafted (abandoned signups never made the user a member).
+const REAL_MEMBERSHIP_STATUSES = [
+  "active",
+  "trialing",
+  "completed",
+  "past_due",
+  "canceled",
+  "expired",
+];
+
 const BOUNCE_EVENT_TYPES = ["bounced", "spam_reported", "unsubscribed"];
 
 const DAY_MS = 86_400_000;
@@ -18,9 +45,7 @@ export async function fetchSignals(
   now: Date = new Date(),
 ): Promise<ScoreSignals> {
   const nowMs = now.getTime();
-  const t30 = new Date(nowMs - 30 * DAY_MS).toISOString();
   const t60 = new Date(nowMs - 60 * DAY_MS).toISOString();
-  const t90 = new Date(nowMs - 90 * DAY_MS).toISOString();
 
   const [memRes, paymentsRes, emailRes] = await Promise.all([
     db
@@ -55,13 +80,30 @@ export async function fetchSignals(
   const payments = paymentsRes.data ?? [];
   const recentEmails = emailRes.data ?? [];
 
-  const activeMemberships = memberships.filter((m) =>
-    ACTIVE_MEMBERSHIP_STATUSES.includes(m.status),
+  // Healthy-active: has the product, billing is fine.
+  // completed never carries cancel_at_period_end; only active/trialing can.
+  const healthyActiveMemberships = memberships.filter(
+    (m) =>
+      HEALTHY_ACTIVE_STATUSES.includes(m.status) &&
+      m.cancel_at_period_end !== true,
   );
+
+  // Canceling: still has access today, but it's going away.
+  const cancelingMemberships = memberships.filter(
+    (m) =>
+      m.status === "past_due" ||
+      ((m.status === "active" || m.status === "trialing") &&
+        m.cancel_at_period_end === true),
+  );
+
   const activeProductIds = new Set(
-    activeMemberships
+    [...healthyActiveMemberships, ...cancelingMemberships]
       .map((m) => m.product_id as string | null)
       .filter((id): id is string => !!id),
+  );
+
+  const hasEverRealMembership = memberships.some((m) =>
+    REAL_MEMBERSHIP_STATUSES.includes(m.status),
   );
 
   const paidPayments = payments.filter((p) => p.status === "paid" || p.status === "succeeded");
@@ -105,8 +147,9 @@ export async function fetchSignals(
       : (lastOpenAt ?? lastClickAt);
 
   return {
-    hasActiveMembership: activeMemberships.length > 0,
-    hasEverHadMembership: memberships.length > 0,
+    hasHealthyActiveMembership: healthyActiveMemberships.length > 0,
+    hasCancelingMembership: cancelingMemberships.length > 0,
+    hasEverRealMembership,
     purchasedLast30Days,
     lastOpenAt,
     lastClickAt,
@@ -114,7 +157,7 @@ export async function fetchSignals(
     totalLtv,
     opensThisMonth,
     opensLastMonth,
-    anyCancelAtPeriodEnd: activeMemberships.some((m) => m.cancel_at_period_end === true),
+    anyCancelAtPeriodEnd: cancelingMemberships.length > 0,
     lastEngagementAt,
     hasBouncedOrComplained: (lifetimeRes.data?.length ?? 0) > 0,
     failedPaymentsLast90Days,

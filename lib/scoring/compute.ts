@@ -1,10 +1,15 @@
 // Pure scoring function. No DB, no side effects — takes aggregated signals,
 // returns a score/temperature/lifecycle plus a breakdown of which rules fired.
 //
-// Lifecycle is derived the same way `segment_eligibility_view` does it:
-//   - has any active-ish membership → "active"
-//   - has ever had a membership     → "churned"
-//   - otherwise                     → "prospect"
+// Lifecycle is derived the same way `segment_eligibility_view` does it
+// (operator-canonical mapping; see CONTEXT.md):
+//   - any healthy-active membership (active/trialing/completed,
+//     no cancel_at_period_end)              → "active"
+//   - else any canceling membership
+//     (past_due, or cancel_at_period_end=true) → "canceling"
+//   - else has ever had a real membership
+//     (anything except drafted-only)         → "churned"
+//   - else                                    → "prospect"
 //
 // Score is clamped 0..100. Temperature falls out of fixed buckets in weights.ts.
 
@@ -17,8 +22,13 @@ import {
 } from "./weights";
 
 export type ScoreSignals = {
-  hasActiveMembership: boolean;
-  hasEverHadMembership: boolean;
+  // True if user has the product right now and billing isn't dying.
+  // Includes status=completed (lifetimes / free community / one-time deliveries).
+  hasHealthyActiveMembership: boolean;
+  // True if access is at risk: past_due, or active/trialing with cancel_at_period_end.
+  hasCancelingMembership: boolean;
+  // True if user has had any real membership ever (excludes drafted-only).
+  hasEverRealMembership: boolean;
   purchasedLast30Days: boolean;
   lastOpenAt: Date | null;
   lastClickAt: Date | null;
@@ -66,7 +76,10 @@ export function computeScore(
   };
 
   // Positive signals
-  add("has_active_paid_membership", signals.hasActiveMembership);
+  add(
+    "has_active_paid_membership",
+    signals.hasHealthyActiveMembership || signals.hasCancelingMembership,
+  );
   add("purchased_last_30_days", signals.purchasedLast30Days);
 
   const dSinceOpen = daysSince(signals.lastOpenAt, nowMs);
@@ -110,11 +123,13 @@ export function computeScore(
   const leadTemperature: Temperature =
     TEMPERATURE_BUCKETS.find((b) => leadScore >= b.min)?.temp ?? "at_risk";
 
-  const lifecycleStage: Lifecycle = signals.hasActiveMembership
+  const lifecycleStage: Lifecycle = signals.hasHealthyActiveMembership
     ? "active"
-    : signals.hasEverHadMembership
-      ? "churned"
-      : "prospect";
+    : signals.hasCancelingMembership
+      ? "canceling"
+      : signals.hasEverRealMembership
+        ? "churned"
+        : "prospect";
 
   return { leadScore, leadTemperature, lifecycleStage, breakdown };
 }

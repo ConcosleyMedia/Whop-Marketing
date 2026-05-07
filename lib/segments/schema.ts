@@ -57,8 +57,10 @@ export const FIELDS: readonly FieldDef[] = [
     key: "lifecycle_stage",
     label: "Lifecycle stage",
     kind: "enum",
-    enumValues: ["active", "churned", "prospect"],
+    enumValues: ["active", "canceling", "churned", "prospect"],
     ops: OPS_ENUM,
+    helpText:
+      "active = has a healthy current membership (incl. completed lifetimes / free community). canceling = past_due or cancel_at_period_end. churned = canceled/expired with no current access. prospect = never a real member (drafted-only or no memberships).",
   },
   {
     key: "verification_status",

@@ -44,4 +44,4 @@ export const TEMPERATURE_BUCKETS = [
 ];
 
 export type Temperature = (typeof TEMPERATURE_BUCKETS)[number]["temp"];
-export type Lifecycle = "prospect" | "active" | "churned";
+export type Lifecycle = "prospect" | "active" | "canceling" | "churned";
